@@ -10,7 +10,7 @@ import os, re, sys, json, time, shutil, threading, traceback, subprocess, queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.4.2'
+VERSION = '1.4.3'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

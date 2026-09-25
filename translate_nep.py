@@ -38,6 +38,16 @@ ATLAS_SRC = '@атлас/нептун'                     # написи на �
 NL_GSTR = '#n'
 EVENT_NAMES = 'database/strevent.gstr'          # IDS_EVT_TITLE_NAME_SUB_<n> — імена мовців
 FONTS = ('window/font/sysfont.ffu', 'window/font/msgfont.ffu', 'window/font/advfont.ffu')
+# шрифт меню — похилий, з гліфів msgfont (так було в старій схемі перекладу);
+# False — оригінальний прямий sysfont
+SYSFONT_ITALIC = True
+
+
+def _font_source(pac, fn, f=None):
+    """Оригінальний шрифт, з якого будується переклад."""
+    if fn == FONTS[0] and SYSFONT_ITALIC:
+        return fontfix.italic_sysfont(pac.read(FONTS[0], f), pac.read(FONTS[1], f))
+    return pac.read(fn, f)
 CL3_ALIGN = 0x40
 _CODE_ONLY = re.compile(r'^(#\w+\[[^\]]*\]\s*)+$')
 _KEY = re.compile(r'^[A-Z][A-Z0-9_]*_[A-Z0-9_]+$')
@@ -304,7 +314,7 @@ def cmd_import(a, progress=None):
             if arc == SYSTEM:
                 for fn in FONTS:
                     try:
-                        repl[fn.replace('/', '\\')], rep = fontfix.fix(pac.read(fn, f))
+                        repl[fn.replace('/', '\\')], rep = fontfix.fix(_font_source(pac, fn, f))
                     except Exception as ex:
                         print(f'! шрифт {fn}: {ex}')
                 print(f'  шрифти: {len(FONTS)} (кирилиця з оригінальних гліфів, '
@@ -607,7 +617,7 @@ def cmd_font(a, progress=None):
     pac = Pac(_orig(a, SYSTEM))
     os.makedirs(a.out_dir, exist_ok=True)
     for fn in FONTS:
-        data, rep = fontfix.fix(pac.read(fn))
+        data, rep = fontfix.fix(_font_source(pac, fn))
         open(os.path.join(a.out_dir, os.path.basename(fn)), 'wb').write(data)
         print(fn, rep)
 

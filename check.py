@@ -89,7 +89,7 @@ def check_nep():
     assert all(x == PROBE * 3 for _a, _b, x, _c in g2.strings())
     print('OK  сцена STCM (текст утричі довший, усі вказівники на місці)')
     for fn in t.FONTS:
-        data, rep = fontfix.fix(sysp.read(fn))
+        data, rep = fontfix.fix(t._font_source(sysp, fn))
         f = Ffu(data)
         assert all(f.index(v) is not None for v in chars.CODE.values()), fn
         assert not rep['missing'], rep

@@ -214,6 +214,23 @@ def _sources(f, slant):
     return src
 
 
+def italic_sysfont(sys_data, msg_data):
+    """Похилий шрифт меню, як у старій схемі перекладу: гліфи й діапазони —
+    з msgfont (похилий «квадратний» стиль), службовий заголовок (0x428 Б, з
+    таблицею) і хвіст — від оригінального sysfont, розмір клітинки — msgfont.
+    Далі — як завжди, fix() кладе кирилицю."""
+    s, m = Ffu(sys_data), Ffu(msg_data)
+    head = bytearray(s.header)
+    head[9], head[10], head[14] = m.cell_w, m.cell_h, m.header[14]
+    m.header = bytes(head)
+    m.range_off = len(head)
+    foot = bytearray(s.footer)
+    if len(foot) > 1:
+        foot[1] = m.cell_h
+    m.footer = bytes(foot)
+    return m.build()
+
+
 def fix(data):
     """Оригінальний .ffu -> (новий .ffu, звіт)."""
     f = Ffu(data)
