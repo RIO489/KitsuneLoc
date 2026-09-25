@@ -33,6 +33,8 @@ import common as locfile
 GAME = 'nep'
 SYSTEM = 'data/SYSTEM00000.pac'
 MAIN = 'data/GAME00000.pac'
+EXTRA = 'data/GAME00001.pac'                   # назви міст і карта світу (картинки)
+ATLAS_SRC = '@атлас/нептун'                     # написи на картинках: один документ
 NL_GSTR = '#n'
 EVENT_NAMES = 'database/strevent.gstr'          # IDS_EVT_TITLE_NAME_SUB_<n> — імена мовців
 FONTS = ('window/font/sysfont.ffu', 'window/font/msgfont.ffu', 'window/font/advfont.ffu')
@@ -44,7 +46,7 @@ _KEY = re.compile(r'^[A-Z][A-Z0-9_]*_[A-Z0-9_]+$')
 # ------------------------------------------------------------------ шляхи
 def archives(game_dir):
     """Відносні шляхи архівів з текстом (скісні вперед)."""
-    out = [SYSTEM, MAIN]
+    out = [SYSTEM, MAIN, EXTRA]
     for p in sorted(glob.glob(os.path.join(game_dir, 'DLC', '*', '*.pac'))):
         out.append(os.path.relpath(p, game_dir).replace('\\', '/'))
     return [a for a in out if os.path.exists(os.path.join(game_dir, *a.split('/')))]
@@ -97,6 +99,10 @@ def _gbnl_entries(g, is_gstr):
                 e['ctx'] = key if is_gstr else ('' if text == head else head)
             if cap is not None:
                 e['cap'] = cap + 1
+            if is_gstr and '\n' in text and NL_GSTR not in text:
+                # справжній перенос, не #n: так записані підписи сейва (World\n,
+                # Save Data %02u\n) — екран сейва #n не розуміє, рядки злипнуться
+                e['nl'] = 'raw'
             out.append(e)
     return out
 
@@ -197,6 +203,9 @@ def cmd_export(a, progress=None):
                 n_str += len(items)
         if n_docs:
             print(f'  {arc}: файлів {n_docs}, рядків {n_str}')
+    n_atl = _export_atlas(a)
+    if n_atl:
+        print(f'  написи на картинках: {n_atl}')
     bad = [arc for arc, n in total_cyr.items() if n > 10]
     if bad:
         raise RuntimeError(
@@ -208,6 +217,19 @@ def cmd_export(a, progress=None):
 
 
 # --------------------------------------------------------------------- імпорт
+def _edges(src, t):
+    """Пробіли й переноси з країв оригіналу — назад у переклад. Excel і книга
+    їх обрізають, а в грі вони значущі: ' (Lv. %u)\\n' — пробіл відділяє рівень
+    від імені, перенос у кінці — наступний рядок на екрані сейва."""
+    lead = src[:len(src) - len(src.lstrip())]
+    trail = src[len(src.rstrip()):]
+    if lead and not t.startswith(lead):
+        t = lead + t.lstrip()
+    if trail and not t.endswith(trail):
+        t = t.rstrip() + trail
+    return t
+
+
 def _tr_map(doc):
     nl = doc.get('newline')
     out = {}
@@ -215,7 +237,8 @@ def _tr_map(doc):
         t = e.get('tr')
         if not t or t == e['src']:
             continue
-        out[e['id']] = t.replace('\n', nl) if nl else t
+        t = _edges(e['src'], t)
+        out[e['id']] = t.replace('\n', nl) if nl and e.get('nl') != 'raw' else t
     return out
 
 
@@ -263,9 +286,10 @@ def _build_one(a, arc, name, blob, warns):
 def cmd_import(a, progress=None):
     os.makedirs(a.out_dir, exist_ok=True)
     warns, n_all = [], 0
+    pics = _import_atlas(a)
     for arc in archives(a.game_dir):
         pac = Pac(_orig(a, arc))
-        repl, n = {}, 0
+        repl, n = dict(pics.pop(arc, {})), 0
         todo = [e for e in pac.entries if _kind(e.name)]
         with open(pac.path, 'rb') as f:
             for k, e in enumerate(todo):
@@ -293,10 +317,125 @@ def cmd_import(a, progress=None):
         pac.repack(dst, repl, progress=_packer(progress, arc))
         n_all += n
     print(f'  усього рядків перекладу: {n_all}')
+    for arc in pics:
+        print(f'! написи для {arc}: такого архіву в грі немає')
     for w in warns[:30]:
         print('  !', w)
     if len(warns) > 30:
         print(f'  ! …і ще {len(warns) - 30}')
+
+
+# --------------------------------------------------------- написи на картинках
+def _atlas_blobs(a, srcs):
+    """{джерело: байти .tid} з чистих оригіналів."""
+    from neptunia import atlas as natl
+    by_arc = {}
+    for s in srcs:
+        arc, inner = natl.split_src(s)
+        by_arc.setdefault(arc, []).append(inner)
+    out = {}
+    for arc, names in by_arc.items():
+        path = _orig(a, arc)
+        if not os.path.exists(path):
+            continue
+        for name, blob in Pac(path).read_some(names).items():
+            out[arc + '/' + name] = blob
+    return out
+
+
+def _export_atlas(a):
+    """Один документ на всі написи; рядок на унікальний напис + прев'ю спрайта."""
+    from neptunia import atlas as natl
+    from maryskelter import atlas as atl
+    from PIL import Image
+    marks = natl.load_marks()
+    if not marks:
+        return 0
+    blobs = _atlas_blobs(a, marks)
+    prev = os.path.join(a.work_dir, '_атлас')
+    os.makedirs(prev, exist_ok=True)
+    known = _menu_translations(a)
+    items, seen = [], {}
+    for src, mark in marks.items():
+        if src not in blobs:
+            print(f'! немає текстури {src}')
+            continue
+        where = mark.get('назва', src)
+        img = None
+        for k, spec in sorted(mark['кадри'].items(), key=atl.order):
+            key = atl.key_of(spec)
+            if key in seen:
+                if where not in seen[key]['ctx'].split(', '):
+                    seen[key]['ctx'] += ', ' + where
+                continue
+            if img is None:
+                from neptunia.tid import Tid
+                img = Tid(blobs[src]).image()
+            spr = img.crop(tuple(spec['рамка']))
+            pic = Image.new('RGBA', spr.size, (32, 32, 40, 255))
+            pic.alpha_composite(spr)
+            pic.thumbnail((260, 40))
+            fn = os.path.join(prev, f'{len(items):04d}.png')
+            pic.convert('RGB').save(fn)
+            it = {'id': key, 'src': natl.source_text(spec), 'ctx': where, 'kind': 'text', 'preview': fn,
+                  'hint': 'напис на картинці: кегль підбере програма; що довше за '
+                          'оригінал — то дрібніше вийде'}
+            seen[key] = it
+            items.append(it)
+    locfile.save_rich(a.work_dir, GAME, ATLAS_SRC, 'atlas', items)
+    # перший раз підказуємо переклад з меню гри (позначка «перевір» у книзі)
+    doc = locfile.load_doc(a.work_dir, ATLAS_SRC)
+    hit = False
+    for e in doc['entries']:
+        t = known.get(e['src'].upper())
+        if t and not e.get('tr'):
+            e['tr'] = e['auto'] = t.upper()
+            hit = True
+    if hit:
+        import json
+        json.dump(doc, open(locfile.path_for(a.work_dir, ATLAS_SRC), 'w', encoding='utf-8'),
+                  ensure_ascii=False, indent=1)
+    return len(items)
+
+
+def _menu_translations(a):
+    """{АНГЛ. ВЕЛИКИМИ: переклад} з уже перекладених рядків меню."""
+    out = {}
+    for p in locfile.walk(os.path.join(a.work_dir, *SYSTEM.split('/'))):
+        doc = locfile.load_json(p)
+        if not doc or not doc['source'].endswith('.gstr'):
+            continue
+        for e in doc['entries']:
+            if e.get('tr') and len(e['src']) < 30:
+                out.setdefault(e['src'].upper(), e['tr'])
+    return out
+
+
+def _import_atlas(a):
+    """Перемалювати текстури за перекладом. -> {архів: {файл: байти .tid}}."""
+    from neptunia import atlas as natl
+    from maryskelter import atlas as atl
+    doc = locfile.load_doc(a.work_dir, ATLAS_SRC)
+    if not doc:
+        return {}
+    tr = {e['id']: e['tr'] for e in doc['entries'] if e.get('tr') and e['tr'] != e['src']}
+    marks = natl.load_marks()
+    todo = [s for s, m in marks.items() if any(atl.key_of(x) in tr for x in m['кадри'].values())]
+    if not todo:
+        return {}
+    styles = atl.load_json('стилі.json')
+    out, n, warns = {}, 0, []
+    for src, blob in _atlas_blobs(a, todo).items():
+        new, k, w = natl.rebuild(blob, marks[src], tr, styles)
+        warns += [f'{marks[src].get("назва", src)}, {x}' for x in w]
+        if new:
+            arc, inner = natl.split_src(src)
+            out.setdefault(arc, {})[inner.replace('/', '\\')] = new
+            n += k
+    for w in warns[:30]:
+        print('  !', w)
+    print(f'  написи на картинках: {n} спрайтів у {len(todo)} текстурах')
+    return out
 
 
 def _packer(progress, arc):
@@ -360,6 +499,110 @@ def cmd_seed(a, progress=None):
     print(f'перенесено перекладених рядків: {took}')
 
 
+def _txt_source(rel, docs_by_pac):
+    """Шлях .txt у теці перекладача -> source документа work.
+    GAME00000/event/…/main.cl3.txt -> data/GAME00000.pac/event/…/main.cl3;
+    DLC/<будь-що>/<архів>/<шлях>.txt -> <той архів у DLC>/<шлях>."""
+    rel = rel.replace('\\', '/')
+    # dlcNNN.txt — сам файл гри; решта — «<файл гри>.txt»
+    parts = (rel if re.search(r'(^|/)dlc\d+\.txt$', rel, re.I) else rel[:-4]).split('/')
+    for k, p in enumerate(parts):
+        arc = docs_by_pac.get(p.lower())
+        if arc:
+            return arc + '/' + '/'.join(parts[k + 1:])
+    return None
+
+
+def cmd_txt(a, progress=None):
+    """Забрати переклад з текстів stcm-editor/Crowdin (теки SYSTEM00000,
+    GAME00000, DLC). Де рядок перекладача відрізняється від англійського —
+    беремо його (це новіша версія); однаковий з оригіналом — не чіпаємо."""
+    import json
+    from neptunia import crowdin
+    by_pac = {os.path.basename(arc)[:-4].lower(): arc for arc in archives(a.game_dir)}
+    files = []
+    for dp, _d, fs in os.walk(a.txt_dir):
+        for fn in fs:
+            if fn.lower().endswith('.txt'):
+                files.append(os.path.relpath(os.path.join(dp, fn), a.txt_dir))
+    st = {'файлів': 0, 'нових': 0, 'замінено': 0, 'без змін': 0, 'не знайдено': 0}
+    missing, orphans, long_ = [], [], []
+    for k, rel in enumerate(sorted(files)):
+        if progress:
+            progress(k + 1, len(files), rel)
+        src = _txt_source(rel, by_pac)
+        doc = locfile.load_doc(a.work_dir, src) if src else None
+        if not doc:
+            orphans.append(rel)
+            continue
+        raw = open(os.path.join(a.txt_dir, rel), 'rb').read()
+        arc = src[:src.lower().index('.pac/') + 4]
+        inner = src[len(arc) + 1:]
+        if doc['format'] == 'dlctxt':
+            lines = chars.decode(raw).translate(crowdin.GREEK).split('\r\n')
+            en = chars.decode(Pac(_orig(a, arc)).read(inner)).split('\r\n')
+            got = {}
+            if len(lines) != len(en) or [x == ';' for x in lines] != [x == ';' for x in en]:
+                orphans.append(rel + ' (будова не як в англійському файлі — пропущено)')
+                continue
+            for x in doc['entries']:
+                n = int(x['id'])
+                if n < len(lines):
+                    t = lines[n]
+                    m = re.match(r'^(\d{3}),(.*)$', t)
+                    got[x['id']] = m.group(2) if m and n == 0 else t
+        else:
+            blob = Pac(_orig(a, arc)).read(inner)
+            g = Gbnl(blob) if doc['format'] == 'gbnl' else _stcm_gbnl(blob)[3]
+            idmap = crowdin.ids(g)
+            got = {}
+            for nid, text in crowdin.parse(raw).items():
+                sid = idmap.get(nid)
+                if sid is None:
+                    missing.append(f'{rel} #{nid}')
+                    continue
+                got[sid] = text
+        nl = doc.get('newline')
+        hit = False
+        for x in doc['entries']:
+            t = got.get(x['id'])
+            if t is None:
+                continue
+            if nl:
+                t = t.replace(nl, '\n')
+            t = t.rstrip(' \n') if not x['src'].endswith((' ', '\n')) else t
+            if not t or t == x['src'] or x.get('kind') == 'key':
+                st['без змін'] += 1
+                continue
+            if re.search('[぀-ヿ㐀-鿿！-～]', t):
+                st['японською — пропущено'] = st.get('японською — пропущено', 0) + 1
+                continue          # проєкт Crowdin DLC зроблено з японської: це неперекладене
+            if x.get('cap') and len(chars.encode(t, 'replace')) + 1 > x['cap']:
+                long_.append(f'{src} [{x["id"]}] {t!r}')
+            if x.get('tr') == t:
+                st['без змін'] += 1
+                continue
+            st['замінено' if x.get('tr') else 'нових'] += 1
+            x['tr'] = t
+            x.pop('auto', None)
+            hit = True
+        st['файлів'] += 1
+        if hit:
+            json.dump(doc, open(locfile.path_for(a.work_dir, src), 'w', encoding='utf-8'),
+                      ensure_ascii=False, indent=1)
+    st['не знайдено'] = len(missing)
+    print('  ' + ', '.join(f'{k}: {v}' for k, v in st.items()))
+    for x in orphans[:20]:
+        print(f'! не знаю, куди це: {x}')
+    for x in missing[:10]:
+        print(f'! немає такого рядка в грі: {x}')
+    for x in long_[:20]:
+        print(f'! задовге для поля фіксованої довжини: {x}')
+    if len(long_) > 20:
+        print(f'! …і ще {len(long_) - 20} задовгих')
+    return st
+
+
 def cmd_font(a, progress=None):
     pac = Pac(_orig(a, SYSTEM))
     os.makedirs(a.out_dir, exist_ok=True)
@@ -381,6 +624,9 @@ def main():
     s = sp.add_parser('seed'); s.add_argument('game_dir'); s.add_argument('work_dir')
     s.add_argument('seed_dir'); s.add_argument('--orig', dest='orig_dir')
     s.set_defaults(fn=cmd_seed)
+    tx = sp.add_parser('txt'); tx.add_argument('game_dir'); tx.add_argument('work_dir')
+    tx.add_argument('txt_dir'); tx.add_argument('--orig', dest='orig_dir')
+    tx.set_defaults(fn=cmd_txt)
     fo = sp.add_parser('font'); fo.add_argument('game_dir'); fo.add_argument('out_dir')
     fo.add_argument('--orig', dest='orig_dir'); fo.set_defaults(fn=cmd_font)
     a = p.parse_args()

@@ -94,6 +94,19 @@ def check_nep():
         assert all(f.index(v) is not None for v in chars.CODE.values()), fn
         assert not rep['missing'], rep
     print('OK  шрифти: 66 українських літер у кожному')
+    from neptunia.tid import Tid
+    from neptunia import atlas as natl
+    blob = Pac(t._orig(ns, t.MAIN)).read('menu/item/title.tid')
+    tid = Tid(blob)
+    assert tid.patch(tid.image(), [(0, 0, 64, 64)]) == blob, 'текстура змінилась без правок'
+    marks = natl.load_marks()
+    src = t.MAIN + '/menu/item/title.tid'
+    if src in marks:
+        from maryskelter import atlas as atl
+        key = atl.key_of(next(iter(marks[src]['кадри'].values())))
+        new, n, _w = natl.rebuild(blob, marks[src], {key: PROBE}, atl.load_json('стилі.json'))
+        assert n == 1 and Tid(new).image().size == tid.image().size
+    print('OK  написи на картинках (.tid)')
 
 
 if __name__ == '__main__':

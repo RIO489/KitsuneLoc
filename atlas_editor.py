@@ -3,8 +3,9 @@
 
 Пишеш переклад — поруч одразу видно, як кнопка виглядатиме в грі (усі її
 варіанти: звичайна, вибрана тощо). Зберігається в ту саму книгу Excel
-«24 Написи на картинках», тож Excel лишається джерелом правди, а кнопка
-«2. Залити переклад у гру» підхопить усе як завжди.
+(Mary Skelter — «24 Написи на картинках», Neptunia — «22 Написи на
+картинках»), тож Excel лишається джерелом правди, а кнопка «2. Залити
+переклад у гру» підхопить усе як завжди.
 """
 import os, threading
 import tkinter as tk
@@ -16,7 +17,7 @@ from maryskelter import atlas as atl, dds
 from maryskelter.bra import Bra
 from maryskelter.cl3 import Cl3
 
-BOOK = '24 Написи на картинках.xlsx'
+BOOKS = {'msk': '24 Написи на картинках.xlsx', 'nep': '22 Написи на картинках.xlsx'}
 SHEET = 'Текст'
 BG = (32, 32, 40, 255)
 MAX_W = 380             # ширина прев'ю в пікселях екрана
@@ -47,6 +48,32 @@ class Atlases:
             return self.cache[src]
 
 
+class NepTextures:
+    """Neptunia: текстури .tid з архівів .pac (backup, інакше тека гри);
+    рамка кадру завжди явна в розмітці, тож нарізка порожня."""
+
+    def __init__(self, backup_dir, game_dir):
+        self.dirs = [d for d in (backup_dir, game_dir) if d]
+        self.cache, self.pacs = {}, {}
+        self.lock = threading.Lock()
+
+    def get(self, src, mark):
+        from neptunia import atlas as natl
+        from neptunia.pac import Pac
+        from neptunia.tid import Tid
+        with self.lock:
+            if src not in self.cache:
+                arc, inner = natl.split_src(src)
+                if arc not in self.pacs:
+                    path = next((os.path.join(d, *arc.split('/')) for d in self.dirs
+                                 if os.path.exists(os.path.join(d, *arc.split('/')))), None)
+                    if path is None:
+                        raise FileNotFoundError(arc)
+                    self.pacs[arc] = Pac(path)
+                self.cache[src] = (Tid(self.pacs[arc].read(inner)).image(), {})
+            return self.cache[src]
+
+
 def variants(marks, key):
     """[(джерело, кадр, spec)] для ключа — без повторів за стилем і розміром."""
     out, seen = [], set()
@@ -62,10 +89,15 @@ def variants(marks, key):
     return out[:MAX_VARIANTS]
 
 
-def render(atlases, marks, styles, key, text):
+def render(atlases, marks, styles, key, text, game='msk'):
     """[(оригінал, результат, масштаб, [попередження])] для кожного варіанта."""
     res = []
     for src, i, spec in variants(marks, key):
+        if game == 'nep' and text:
+            from neptunia import atlas as natl
+            text_i = natl.text_for(spec, text)   # розрізані слова: «!!» окремим спрайтом
+        else:
+            text_i = text
         img, boxes = atlases.get(src, marks[src])
         box = atl.box_of(i, spec, boxes)
         orig = img.crop(box)
@@ -73,7 +105,7 @@ def render(atlases, marks, styles, key, text):
             # малюємо на копії всього атласу: тло "шаблон" береться з іншого кадру
             work = img.copy()
             info = {}
-            warn = atl.draw(work, box, spec, styles, text, info)
+            warn = atl.draw(work, box, spec, styles, text_i, info)
             res.append((orig, work.crop(box), info.get('масштаб', 1.0), warn))
         else:
             res.append((orig, orig, 1.0, []))
@@ -93,14 +125,22 @@ class Editor(tk.Toplevel):
         super().__init__(app)
         self.app = app
         work, xl, _out, bk = app.dirs()
-        self.book = os.path.join(xl, BOOK)
+        self.game = app.cur['game']
+        self.book_name = BOOKS[self.game]
+        self.book = os.path.join(xl, self.book_name)
         if not os.path.exists(self.book):
             self.destroy()
-            raise RuntimeError('Книги «24 Написи на картинках» ще немає — '
+            raise RuntimeError(f'Книги «{self.book_name[:-5]}» ще немає — '
                                'спершу натисни «1. Дістати текст з гри».')
-        self.marks = {k: v for k, v in atl.load_json('написи.json').items() if not k.startswith('_')}
+        if self.game == 'nep':
+            from neptunia import atlas as natl
+            self.marks = natl.load_marks()
+            self.atlases = NepTextures(bk, app.root_dir())
+        else:
+            self.marks = {k: v for k, v in atl.load_json('написи.json').items()
+                          if not k.startswith('_')}
+            self.atlases = Atlases(bk, app.root_dir())
         self.styles = atl.load_json('стилі.json')
-        self.atlases = Atlases(bk, app.root_dir())
         self.rows = self._read_book()           # [{id, src, tr, where}]
         self.edits = {}                          # id -> новий переклад (ще не збережений)
         self.cur = None
@@ -142,10 +182,10 @@ class Editor(tk.Toplevel):
     def _save(self):
         if not self.edits:
             return True
-        lock = os.path.join(os.path.dirname(self.book), '~$' + BOOK)
+        lock = os.path.join(os.path.dirname(self.book), '~$' + self.book_name)
         if os.path.exists(lock):
             messagebox.showwarning('Книга відкрита в Excel',
-                                   'Закрий «24 Написи на картинках» в Excel і збережи ще раз — '
+                                   f'Закрий «{self.book_name[:-5]}» в Excel і збережи ще раз — '
                                    'інакше Excel потім перезапише ці зміни.', parent=self)
             return False
         from openpyxl import load_workbook
@@ -345,7 +385,7 @@ class Editor(tk.Toplevel):
 
         def work():
             try:
-                res = render(self.atlases, self.marks, self.styles, key, text)
+                res = render(self.atlases, self.marks, self.styles, key, text, self.game)
                 err = None
             except Exception as ex:                                   # noqa: BLE001
                 res, err = [], str(ex)

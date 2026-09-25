@@ -170,7 +170,8 @@ DEFAULT_BOOKS = {
            [r'/EVENT/DATA/21\d{4}\.gbin$', '16 Короткі репліки 21xxxx']]
     ),
     'nep': (
-        [[r'^DLC/', '21 DLC'],
+        [[r'^@атлас/', '22 Написи на картинках'],
+         [r'^DLC/', '21 DLC'],
          [r'/database/str\w+\.gstr$', '01 Меню та система'],
          [r'/database/stitem', '02 Предмети'],
          [r'/database/stremake', '03 Створення (Remake)'],

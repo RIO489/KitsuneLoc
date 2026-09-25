@@ -167,7 +167,7 @@ class App(tk.Tk):
         self._apply_theme()
         self._refresh_path()
         self._open_log()
-        self.say(f'Переклад ігор, версія {VERSION}.', 'dim')
+        self.say(f'KitsuneLoc, версія {VERSION}.', 'dim')
         self.after(80, self._poll)
         self.after(200, self._check_deps)
 
@@ -414,7 +414,7 @@ class App(tk.Tk):
                 open(LOGFILE, 'w', encoding='utf-8').close()
             self.logf = open(LOGFILE, 'a', encoding='utf-8')
             self.logf.write(f'\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} '
-                            f'версія {VERSION} =====\n')
+                            f'KitsuneLoc {VERSION} =====\n')
             self.logf.flush()
         except OSError:
             self.logf = None
@@ -502,7 +502,8 @@ class App(tk.Tk):
                      'maryskelter.cpk', 'maryskelter.ffu', 'maryskelter.fontfix',
                      'maryskelter',
                      'neptunia.pac', 'neptunia.chars', 'neptunia.gbnl', 'neptunia.stcm',
-                     'neptunia.ffu', 'neptunia.fontfix', 'neptunia',
+                     'neptunia.ffu', 'neptunia.fontfix', 'neptunia.tid', 'neptunia.ssa',
+                     'maryskelter.atlas', 'neptunia.atlas', 'neptunia',
                      'sheets', 'translate_msk', 'translate_crystar', 'translate_nep'):
             mod = sys.modules.get(name)
             if mod is not None:
@@ -897,12 +898,15 @@ class App(tk.Tk):
     def open_pics(self):
         """Вікно перекладу написів на картинках з живим прев'ю."""
         self._snap()
-        if self.cur['game'] != 'msk':
-            messagebox.showinfo('Лише Mary Skelter',
-                                'Написи на картинках є тільки в Mary Skelter: Nightmares.')
+        if self.cur['game'] not in ('msk', 'nep'):
+            messagebox.showinfo('Немає написів',
+                                'Написи на картинках є в Mary Skelter і Neptunia Re;Birth1.')
             return
         try:
+            self._fresh()
             import atlas_editor
+            import importlib
+            importlib.reload(atlas_editor)
             atlas_editor.Editor(self)
         except Exception as e:
             messagebox.showerror('Написи на картинках', str(e))
@@ -915,7 +919,12 @@ class App(tk.Tk):
             messagebox.showerror('Помилка', str(e)); return
         if not os.path.exists(exe):
             messagebox.showerror('Помилка', f'Не знайшов {exe}'); return
-        self._open_path(exe)
+        # робоча тека — тека гри: Neptunia шукає data\ відносно неї, і без
+        # цього одразу падає («Application has crashed»)
+        try:
+            subprocess.Popen([exe], cwd=os.path.dirname(exe))
+        except OSError as e:
+            messagebox.showerror('Не вдалося запустити гру', str(e))
 
 
 if __name__ == '__main__':

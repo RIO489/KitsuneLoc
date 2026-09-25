@@ -25,6 +25,20 @@ def _code(ch):
     return int.from_bytes(ch.encode('cp932'), 'big')
 
 
+def _encodable(ch):
+    try:
+        ch.encode('cp932')
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
+# стара схема перекладу (Crowdin/stcm-editor): і ї є ґ писались грецькими
+# літерами Shift-JIS; так вони лежать у старих сейвах (назва локації тощо)
+OLD_SUBST = {'І': 0x839F, 'Ї': 0x83A0, 'Ґ': 0x83A1, 'Є': 0x83A2,
+             'і': 0x83BF, 'ї': 0x83C0, 'ґ': 0x83C1, 'є': 0x83C2}
+
+
 def _bbox(rows, thr=INK):
     xs = [x for r in rows for x, v in enumerate(r) if v >= thr]
     ys = [y for y, r in enumerate(rows) if any(v >= thr for v in r)]
@@ -210,7 +224,13 @@ def fix(data):
         f.add_range(0xFD, 0x100)
     src = _sources(f, slant)
     done = []
-    for ch, code in chars.CODE.items():
+    # однобайтові слоти — основна схема; двобайтові коди — для тексту, який
+    # гра зберегла в старих сейвах за старою схемою (кирилиця 0x84xx, а
+    # і ї є ґ — грецькими α β δ γ): там теж мають бути охайні українські літери
+    slots = [(ch, code) for ch, code in chars.CODE.items()]
+    slots += [(ch, _code(ch)) for ch in chars.UPPER + chars.LOWER if _encodable(ch)]
+    slots += list(OLD_SUBST.items())
+    for ch, code in slots:
         rows = src.get(ch)
         i = f.index(code)
         if rows is None or i is None:
@@ -221,7 +241,8 @@ def fix(data):
         if new is None:
             continue
         f.set_glyph_at(i, new, lb + w + rb)
-        done.append(ch)
+        if code in chars.LETTER:
+            done.append(ch)
     rep = {'letters': len(done), 'slant': round(slant, 3),
            'bearings': (lb_lo, rb_lo, lb_up, rb_up),
            'missing': [c for c in chars.CODE if c not in done]}

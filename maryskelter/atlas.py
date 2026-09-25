@@ -128,9 +128,11 @@ def render(text, st, px, align='центр'):
         text = text.upper()
     f = _font(st, px * SS)
     stroke = round(st.get('обведення', {}).get('товщина', 0) * SS)
+    # друге, зовнішнє обведення (Neptunia: тонкий темний контур + товстий світлий)
+    stroke2 = round(st.get('обведення2', {}).get('товщина', 0) * SS)
     glow = st.get('сяйво') or {}
     shadow = st.get('тінь') or {}
-    pad = stroke + round((glow.get('радіус', 0) * 3 + max(map(abs, shadow.get('зсув', [0, 0])))
+    pad = max(stroke, stroke2) + round((glow.get('радіус', 0) * 3 + max(map(abs, shadow.get('зсув', [0, 0])))
                           + shadow.get('розмиття', 0) * 3) * SS) + 4 * SS
     # кілька рядків: кожен зі своєю базовою лінією, крок — кегль × інтерліньяж
     lines = text.split('\n')
@@ -161,6 +163,11 @@ def render(text, st, px, align='центр'):
 
     core = mask(0)
     outer = mask(stroke) if stroke else core
+    outer2 = mask(stroke2) if stroke2 > stroke else None
+    if outer2 is not None:
+        stroke_all = outer2          # тінь і сяйво — від найширшого контуру
+    else:
+        stroke_all = outer
     out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
 
     def put(m, color, strength=1.0):
@@ -173,11 +180,13 @@ def render(text, st, px, align='центр'):
 
     if shadow:
         dx, dy = (round(v * SS) for v in shadow.get('зсув', [2, 2]))
-        put(_blur(ImageChops.offset(outer, dx, dy), shadow.get('розмиття', 0)),
+        put(_blur(ImageChops.offset(stroke_all, dx, dy), shadow.get('розмиття', 0)),
             shadow.get('колір', '#000000c0'))
     if glow:
-        put(_blur(outer, glow.get('радіус', 4)), glow.get('колір', '#ff00aa'),
+        put(_blur(stroke_all, glow.get('радіус', 4)), glow.get('колір', '#ff00aa'),
             glow.get('сила', 1.5))
+    if outer2 is not None:
+        put(outer2, st['обведення2'].get('колір', '#ffffff'))
     if stroke:
         put(outer, st['обведення'].get('колір', '#000000'))
     fill = st.get('заливка', '#ffffff')
@@ -205,6 +214,12 @@ def render(text, st, px, align='центр'):
         out = out.rotate(rot, Image.BICUBIC, center=c)
         core = core.rotate(rot, Image.BILINEAR, center=c)
         cb = core.getbbox() or cb
+    k = st.get('розтяг', 1.0)                        # широкий шрифт гри: тягнемо по горизонталі
+    if k != 1.0:
+        w = max(1, round(w * k))
+        out = out.resize((w, h), Image.LANCZOS)
+        cb = [cb[0] * k, cb[1], cb[2] * k, cb[3]]
+        bx *= k
     out = out.resize((max(1, round(w / SS)), max(1, round(h / SS))), Image.LANCZOS)
     return out, bx / SS, by / SS, [v / SS for v in cb]
 

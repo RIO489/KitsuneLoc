@@ -90,12 +90,13 @@ def _huff_chunk(src, pos, end, size):
     return bytes(out)
 
 
-def decompress(blob):
+def decompress(blob, chunks=None):
+    """chunks — розпакувати лише перші N шматків (напр. щоб прочитати заголовок)."""
     magic, cnt, _ftype, hoff = struct.unpack_from('<IIII', blob, 0)
     if magic != 0x1234:
         raise ValueError('немає сигнатури 0x1234 у стисненому файлі')
     out = []
-    for k in range(cnt):
+    for k in range(cnt if chunks is None else min(cnt, chunks)):
         usize, psize, doff = struct.unpack_from('<III', blob, 16 + 12 * k)
         start = hoff + doff
         out.append(_huff_chunk(blob, start, start + psize, usize))
@@ -140,6 +141,13 @@ class Pac:
             return b''
         blob = self.read_raw(e, f)
         return decompress(blob) if e.packed == 1 else blob[:e.unpack_size]
+
+    def read_head(self, e, f=None):
+        """Початок файлу (перший стиснений шматок) — швидко, для заголовків."""
+        if not e.pack_size:
+            return b''
+        blob = self.read_raw(e, f)
+        return decompress(blob, 1) if e.packed == 1 else blob[:0x10000]
 
     def read_some(self, names):
         """{ім'я як у запиті: байти}; відсутніх у результаті немає."""
