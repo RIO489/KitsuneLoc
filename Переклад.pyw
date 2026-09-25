@@ -10,7 +10,7 @@ import os, re, sys, json, time, shutil, threading, traceback, subprocess, queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.4'
+VERSION = '1.4.1'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -626,6 +626,57 @@ class App(tk.Tk):
         return (os.path.join(WORK, g), os.path.join(XLSX, GAMES[g]['folder']),
                 os.path.join(OUT, g), os.path.join(BACKUP, g))
 
+    def check_originals(self, fix=True):
+        """Чи справді в backup лежать оригінали (відбитки — оригінали.json).
+
+        Резервна копія, зроблена з уже перекладеної гри (напр. після перенесення
+        теки програми), ламає все, що читає «оригінал»: написи на картинках
+        малюються поверх перекладу й з кожним разом гіршають. Якщо копія не
+        оригінальна, а в теці гри чистий файл (після перевірки в Steam), —
+        оновлюємо копію (fix=True). Повертає список проблемних файлів."""
+        p = os.path.join(HERE, 'оригінали.json')
+        g = self.cur['game']
+        try:
+            known = json.load(open(p, encoding='utf-8')).get(g) or {}
+        except (OSError, ValueError):
+            return []
+        if not known:
+            return []
+        import common
+        bk_root, dest = self.dirs()[3], self.data_dir()
+        bad = []
+        for rel, want in known.items():
+            bk = os.path.join(bk_root, *rel.split('/'))
+            gm = os.path.join(dest, *rel.split('/'))
+            b_ok = os.path.exists(bk) and common.fingerprint(bk) == want
+            if b_ok:
+                continue
+            g_ok = os.path.exists(gm) and common.fingerprint(gm) == want
+            if os.path.exists(bk):
+                if g_ok and fix:
+                    self.say(f'  резервна копія {rel} не була оригіналом — '
+                             f'замінюю чистим файлом з теки гри', 'warn')
+                    os.makedirs(os.path.dirname(bk), exist_ok=True)
+                    shutil.copy2(gm, bk + '.new')
+                    os.replace(bk + '.new', bk)
+                elif not g_ok:
+                    bad.append(rel)
+            elif os.path.exists(gm) and not g_ok:
+                bad.append(rel)          # копії немає, а в грі вже змінений файл
+        return bad
+
+    def _require_originals(self):
+        bad = self.check_originals()
+        if bad:
+            raise RuntimeError(
+                'Немає чистих оригіналів гри для: ' + ', '.join(bad) + '.\n'
+                'Резервні копії в backup зроблено з уже перекладених файлів, тож програма '
+                'малювала б переклад поверх перекладу.\n'
+                'Що зробити: закрий гру → Steam → гра → Властивості → Встановлені файли → '
+                '«Перевірити цілісність файлів гри». Потім натисни кнопку ще раз — програма '
+                'сама оновить резервні копії.\n'
+                '(Якщо гру щойно оновили в Steam — напиши розробнику: треба оновити оригінали.json.)')
+
     # ------------------------------------------------------------------- дії
     @staticmethod
     def open_books(xl):
@@ -642,6 +693,7 @@ class App(tk.Tk):
         if busy:
             raise RuntimeError('Спершу закрий в Excel: ' + ', '.join(busy) +
                                '\n(збережи зміни — вони нікуди не дінуться, програма їх підхопить)')
+        self._require_originals()
         if os.path.isdir(xl):
             self.say('Читаю те, що вже перекладено…')
             st = sheets.read_into_work(xl, work, self.step)
@@ -688,6 +740,7 @@ class App(tk.Tk):
                      '. Беру те, що збережено на диску — незбережені зміни не потраплять у гру.',
                      'warn')
         self._check_space()
+        self._require_originals()
         self.say('Читаю переклад з Excel…')
         st = sheets.read_into_work(xl, work, self.step)
         self.say(f'  книг: {st["books"]}, рядків: {st["rows"]}, '
@@ -901,6 +954,18 @@ class App(tk.Tk):
         if self.cur['game'] not in ('msk', 'nep'):
             messagebox.showinfo('Немає написів',
                                 'Написи на картинках є в Mary Skelter і Neptunia Re;Birth1.')
+            return
+        try:
+            bad = self.check_originals(fix=False)
+        except RuntimeError:
+            bad = []
+        if bad:
+            messagebox.showwarning(
+                'Немає чистих оригіналів',
+                'Резервні копії гри (' + ', '.join(bad) + ') — не оригінали, тож колонка '
+                '«Оригінал» показала б уже перекладені картинки.\n\n'
+                'Закрий гру, у Steam зроби «Перевірити цілісність файлів гри» і натисни '
+                '«1. Дістати текст з гри» — програма оновить копії. Потім відкрий це вікно знову.')
             return
         try:
             self._fresh()

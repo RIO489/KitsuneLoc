@@ -94,6 +94,19 @@ def save_rich(root, game, source, fmt, entries, meta=None):
     return dst
 
 
+def fingerprint(path, chunk=1 << 20):
+    """«Відбиток» великого файлу гри: розмір + md5 першого й останнього мегабайта.
+    Перепакований (перекладений) архів майже завжди має інший розмір, а хвіст/
+    початок з індексом — інші байти; читати весь файл (сотні МБ) не треба."""
+    import hashlib
+    size = os.path.getsize(path)
+    with open(path, 'rb') as f:
+        head = hashlib.md5(f.read(chunk)).hexdigest()
+        f.seek(max(0, size - chunk))
+        tail = hashlib.md5(f.read(chunk)).hexdigest()
+    return [size, head, tail]
+
+
 def load_doc(root, source):
     dst = path_for(root, source)
     return json.load(open(dst, encoding='utf-8')) if os.path.exists(dst) else None
