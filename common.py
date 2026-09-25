@@ -107,6 +107,51 @@ def fingerprint(path, chunk=1 << 20):
     return [size, head, tail]
 
 
+PATCH_EPOCH = 1609459200          # 2021-01-01: у справжніх .bra MSK усі файли 2017–2018 р.
+
+
+def looks_patched(path):
+    """Чи сліди перепакування в архіві: True / False / None (не знаю формату).
+    Не залежить від збірки гри в Steam (на відміну від відбитка):
+      .bra (MSK) — є файл із датою після 2021 р. (Bra.repack ставить «зараз»);
+      .pac (Neptunia) — є нестиснений файл (оригінали стиснені повністю,
+      змінені пишемо нестисненими — і ми, і стара схема nr1_packer)."""
+    import struct
+    low = path.lower()
+    with open(path, 'rb') as f:
+        if low.endswith('.bra'):
+            magic, _v, off, cnt = struct.unpack('<4sIII', f.read(16))
+            if magic != b'PDA\0':
+                return None
+            f.seek(off)
+            idx, p = f.read(), 0
+            for _ in range(cnt):
+                mtime, nlen = struct.unpack_from('<I', idx, p)[0], struct.unpack_from('<H', idx, p + 16)[0]
+                if mtime >= PATCH_EPOCH:
+                    return True
+                p += 24 + nlen
+            return False
+        if low.endswith('.pac'):
+            magic, _f, cnt, _s = struct.unpack('<8sIII', f.read(20))
+            if magic != b'DW_PACK\0':
+                return None
+            raw = f.read(288 * cnt)
+            for k in range(cnt):
+                size, _u, packed = struct.unpack_from('<III', raw, 288 * k + 272)
+                if size and packed != 1:
+                    return True
+            return False
+    return None
+
+
+def is_original(path, want=None):
+    """Відбиток збігся — точно оригінал; ні — вирішують сліди перепакування
+    (інша збірка гри в Steam має інші відбитки, але слідів не має)."""
+    if want and fingerprint(path) == want:
+        return True
+    return looks_patched(path) is False
+
+
 def load_doc(root, source):
     dst = path_for(root, source)
     return json.load(open(dst, encoding='utf-8')) if os.path.exists(dst) else None

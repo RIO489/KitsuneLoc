@@ -10,7 +10,7 @@ import os, re, sys, json, time, shutil, threading, traceback, subprocess, queue
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.4.1'
+VERSION = '1.4.2'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -648,10 +648,10 @@ class App(tk.Tk):
         for rel, want in known.items():
             bk = os.path.join(bk_root, *rel.split('/'))
             gm = os.path.join(dest, *rel.split('/'))
-            b_ok = os.path.exists(bk) and common.fingerprint(bk) == want
+            b_ok = os.path.exists(bk) and common.is_original(bk, want)
             if b_ok:
                 continue
-            g_ok = os.path.exists(gm) and common.fingerprint(gm) == want
+            g_ok = os.path.exists(gm) and common.is_original(gm, want)
             if os.path.exists(bk):
                 if g_ok and fix:
                     self.say(f'  резервна копія {rel} не була оригіналом — '
@@ -670,12 +670,11 @@ class App(tk.Tk):
         if bad:
             raise RuntimeError(
                 'Немає чистих оригіналів гри для: ' + ', '.join(bad) + '.\n'
-                'Резервні копії в backup зроблено з уже перекладених файлів, тож програма '
-                'малювала б переклад поверх перекладу.\n'
+                'І резервні копії в backup, і файли в теці гри вже перекладені (перепаковані '
+                'програмою), тож програма малювала б переклад поверх перекладу.\n'
                 'Що зробити: закрий гру → Steam → гра → Властивості → Встановлені файли → '
                 '«Перевірити цілісність файлів гри». Потім натисни кнопку ще раз — програма '
-                'сама оновить резервні копії.\n'
-                '(Якщо гру щойно оновили в Steam — напиши розробнику: треба оновити оригінали.json.)')
+                'сама оновить резервні копії. Переклад у книгах Excel не постраждає.')
 
     # ------------------------------------------------------------------- дії
     @staticmethod
