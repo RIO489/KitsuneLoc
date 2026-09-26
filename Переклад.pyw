@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.5'
+VERSION = '1.5.1'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

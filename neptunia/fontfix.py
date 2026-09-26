@@ -214,6 +214,45 @@ def _sources(f, slant):
     return src
 
 
+HEART = 0x81E6     # ∵ — перекладач пише його замість ♡ (у старій схемі тут було сердечко)
+STAR = 0x8199      # ☆ — зразок розміру, товщини й положення значка в цьому шрифті
+
+
+def _heart(f):
+    """Контурне сердечко ♡ у слот ∵: в межах ☆ того ж шрифту (той самий розмір
+    і базова лінія, товщина контуру — як у зірочки). ♡ у Shift-JIS немає."""
+    import math
+    from PIL import Image, ImageDraw
+    star, i = f.glyph(STAR), f.index(HEART)
+    if not star or i is None:
+        return False
+    xadv, rows = star
+    h, w = len(rows), len(rows[0])
+    bb = _bbox(rows)
+    if not bb:
+        return False
+    x0, x1, y0, y1 = bb
+    ink = sum(v for r in rows for v in r) / 15             # «площа» контуру зірочки
+    stroke = max(1.2, min(3.0, ink / (2.6 * (x1 - x0 + y1 - y0 + 2))))
+    S = 8
+    im = Image.new('L', (w * S, h * S), 0)
+    d = ImageDraw.Draw(im)
+    # класична крива серця, вписана в рамку зірочки з відступом на пів контуру
+    pts = [(16 * math.sin(t) ** 3, -(13 * math.cos(t) - 5 * math.cos(2 * t) - 2 * math.cos(3 * t)
+                                     - math.cos(4 * t))) for t in [k * math.pi / 90 for k in range(181)]]
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    pad = stroke / 2
+    bx0, bx1, by0, by1 = x0 + pad, x1 + 1 - pad, y0 + pad, y1 + 1 - pad
+    sx = (bx1 - bx0) / (max(xs) - min(xs))
+    sy = (by1 - by0) / (max(ys) - min(ys))
+    poly = [((bx0 + (px - min(xs)) * sx) * S, (by0 + (py - min(ys)) * sy) * S) for px, py in pts]
+    d.line(poly + [poly[0]], fill=255, width=max(1, round(stroke * S)), joint='curve')
+    im = im.resize((w, h), Image.LANCZOS)
+    heart = [[min(15, (im.getpixel((x, y)) + 8) // 17) for x in range(w)] for y in range(h)]
+    f.set_glyph_at(i, heart, xadv)
+    return True
+
+
 def italic_sysfont(sys_data, msg_data):
     """Похилий шрифт меню, як у старій схемі перекладу: гліфи й діапазони —
     з msgfont (похилий «квадратний» стиль), службовий заголовок (0x428 Б, з
@@ -260,7 +299,7 @@ def fix(data):
         f.set_glyph_at(i, new, lb + w + rb)
         if code in chars.LETTER:
             done.append(ch)
-    rep = {'letters': len(done), 'slant': round(slant, 3),
+    rep = {'letters': len(done), 'slant': round(slant, 3), 'heart': _heart(f),
            'bearings': (lb_lo, rb_lo, lb_up, rb_up),
            'missing': [c for c in chars.CODE if c not in done]}
     return f.build(), rep
