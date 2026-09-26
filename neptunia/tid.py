@@ -4,8 +4,11 @@
 0x94 — DXT), u32 розмір файлу @0x04, u32 0x80 @0x08, ім'я[32] @0x20,
 u32 ширина @0x44, u32 висота @0x48, u32 біт на піксель @0x4c,
 u32 розмір даних @0x58, u32 зсув даних @0x5c; для DXT — fourcc @0x64
-('DXT1' / 'DXT5'). Пікселі сирих текстур — RGBA (прапорець 0x02 — BGRA?
-див. FLAG_BGRA; визначено за виглядом у грі).
+('DXT1' / 'DXT5'). Пікселі сирих текстур — RGBA; з прапорцем 0x02 (0x92) —
+ARGB, альфа перша (world/name/mapname: [179,0,0,0] — чорна смуга під назвою;
+picture/help/0014: ARGB дає правильні кольори, ABGR міняє синій з червоним).
+Раніше тут було BGRA: на білому тексті різниці не видно, а напівпрозора
+смуга під назвами локацій читалась як порожнеча й стиралась.
 
 Запис: сирі пікселі переписуємо як є; DXT перекодовуємо ЛИШЕ блоки 4×4, що
 перетинають змінені прямокутники, — решта байтів лишається оригінальною.
@@ -40,15 +43,17 @@ class Tid:
             return Image.frombytes('RGBA', (self.w, self.h), raw, 'raw', 'BGRA')
         if self.bpp != 32:
             raise ValueError(f'формат {self.kind} не підтримується')
-        mode = 'BGRA' if self.flags & 0x02 else 'RGBA'
+        mode = 'ARGB' if self.flags & 0x02 else 'RGBA'
         return Image.frombytes('RGBA', (self.w, self.h), px, 'raw', mode)
 
     def patch(self, img, rects):
         """Нові байти TID: img — вся текстура (RGBA), rects — змінені місця."""
         out = bytearray(self.data)
         if not self.fourcc:
-            mode = 'BGRA' if self.flags & 0x02 else 'RGBA'
-            out[self.off:self.off + self.size] = img.tobytes('raw', mode)
+            if self.flags & 0x02:                    # ARGB: у PIL немає такого пакувальника
+                r, g, b, a = img.split()
+                img = Image.merge('RGBA', (a, r, g, b))
+            out[self.off:self.off + self.size] = img.tobytes('raw', 'RGBA')
             return bytes(out)
         import etcpak
         bs = 8 if self.fourcc == b'DXT1' else 16

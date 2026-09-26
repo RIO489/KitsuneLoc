@@ -18,6 +18,8 @@
               "стрічка"  — трикутна стрічка-ярлик у кутку рамки: малюємо її
                            наново за "стрічка": {верх, низ, ліво, кінчик,
                            колір, над, під, лінія} (координати кадру);
+              "смуга"    — напис на напівпрозорій смузі: рамку стираємо, смугу
+                           малюємо наново під ширину нового тексту (_band);
               "картинка" — кадр цілком накриваємо готовим чистим тлом
                            "файл" з атлас/тло/ (порожня кнопка з іншого атласу)
     обертання 90 | -90 | 180 — напис іде вздовж кадру (знизу вгору тощо): уся
@@ -312,6 +314,9 @@ def erase(img, box, spec):
     if spec.get('тло', 'рядки') == 'прозорий':
         img.paste((0, 0, 0, 0), (x0, y0, x1, y1))
         return
+    if spec.get('тло') == 'смуга':                  # напис на смузі: смугу малюємо наново (_band)
+        img.paste((0, 0, 0, 0), box)
+        return
     if spec.get('тло') == 'похила':                 # похила смуга: над нею — одне, у ній — інше
         s = spec['похила']
         (ta, tb), (ba, bb) = s['верх'], s['низ']       # y = a*x + b у координатах кадру
@@ -473,14 +478,54 @@ def draw(img, box, spec, styles, text, info=None):
     else:                                           # інша к-сть рядків — по центру літер
         oy = round((ly0 + ly1) / 2 - (cb[1] + cb[3]) / 2)
 
+    band = _band(img.crop(box), left, left + w) if spec.get('тло') == 'смуга' else None
     erase(img, box, spec)
     # малюємо в окремий шар розміром кадру — сусідні спрайти не зачепимо
     layer = Image.new('RGBA', (box[2] - box[0], box[3] - box[1]), (0, 0, 0, 0))
     layer.paste(im, (ox, oy), im)
     frame = img.crop(box)
+    if band is not None:
+        frame.alpha_composite(band)
     frame.alpha_composite(layer)
     img.paste(frame, box[:2])
     return warn
+
+
+def _band(orig, nx0, nx1):
+    """Напівпрозора смуга під написом (назви локацій Neptunia) під ширину НОВОГО
+    тексту [nx0, nx1): колір, вертикальний профіль, згасання країв і відступи від
+    тексту — як в оригінальному кадрі. None — смуги в оригіналі немає."""
+    w, h = orig.size
+    px = orig.load()
+    cols = [x for x in range(w) if any(px[x, y][3] for y in range(h))]
+    if not cols:
+        return None
+    bx0, bx1 = cols[0], cols[-1] + 1
+    mid = h // 2
+    fade = []                                       # згасання лівого краю: до першого «плато»
+    for x in range(bx0, bx1):
+        a = px[x, mid][3]
+        if fade and a <= fade[-1]:
+            break
+        fade.append(a)
+    top = fade.pop() if len(fade) > 1 else (fade[0] if fade else 0)
+    cx = bx0 + len(fade)                            # стовпчик самої смуги (ще без тексту)
+    color = px[cx, mid][:3]
+    prof = [px[cx, y][3] / max(1, top) for y in range(h)]
+    ink = [x for x in range(w) if any(px[x, y][3] and max(px[x, y][:3]) > 60 for y in range(h))]
+    if not ink or not top:
+        return None
+    m_l, m_r = ink[0] - bx0, bx1 - (ink[-1] + 1)
+    x0, x1 = max(0, round(nx0) - m_l), min(w, round(nx1) + m_r)
+    out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
+    op = out.load()
+    n = len(fade)
+    for x in range(x0, x1):
+        k = x - x0
+        a = fade[k] if k < n else fade[x1 - 1 - x] if x1 - 1 - x < n else top
+        for y in range(h):
+            op[x, y] = color + (round(a * prof[y]),)
+    return out
 
 
 # ------------------------------------------------------------------ атлас цілком
