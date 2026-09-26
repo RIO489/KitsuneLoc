@@ -103,6 +103,60 @@ def decompress(blob, chunks=None):
     return b''.join(out)
 
 
+# ------------------------------------------------- кеш розпакованих файлів
+# Huffman на Python — десятки секунд на кожен крок «1»/«2», а оригінали в
+# backup не змінюються. Тому розпаковане лежить у кеш/pac.sqlite (один файл:
+# тисячі дрібних файлів на Windows відкривались би повільно через антивірус).
+# Ключ — ім'я, розмір і час зміни архіву: інший архів — інший ключ.
+CACHE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'кеш', 'pac.sqlite')
+CACHE_MAX = 512 << 20            # більше — просто починаємо кеш заново
+_db = globals().get('_db')       # вікно перечитує модулі перед кожною дією — з'єднання лишаємо
+_db_lock = globals().get('_db_lock') or __import__('threading').Lock()
+
+
+def _conn():
+    global _db
+    if _db is None:
+        import sqlite3
+        os.makedirs(os.path.dirname(CACHE), exist_ok=True)
+        if os.path.exists(CACHE) and os.path.getsize(CACHE) > CACHE_MAX:
+            for x in ('', '-wal', '-shm'):
+                try:
+                    os.remove(CACHE + x)
+                except OSError:
+                    pass
+        _db = sqlite3.connect(CACHE, check_same_thread=False, isolation_level=None)
+        _db.execute('PRAGMA journal_mode=WAL')
+        _db.execute('PRAGMA synchronous=OFF')
+        _db.execute('CREATE TABLE IF NOT EXISTS f (arc TEXT, i INTEGER, data BLOB, PRIMARY KEY (arc, i))')
+    return _db
+
+
+def _cache_key(pac):
+    if not hasattr(pac, '_key'):
+        st = os.stat(pac.path)
+        pac._key = f'{os.path.basename(pac.path)}:{st.st_size}:{st.st_mtime_ns}'
+    return pac._key
+
+
+def _cache_get(pac, e):
+    try:
+        with _db_lock:
+            row = _conn().execute('SELECT data FROM f WHERE arc=? AND i=?',
+                                  (_cache_key(pac), e.i)).fetchone()
+    except Exception:
+        return None
+    return bytes(row[0]) if row and len(row[0]) == e.unpack_size else None
+
+
+def _cache_put(pac, e, data):
+    try:
+        with _db_lock:
+            _conn().execute('INSERT OR REPLACE INTO f VALUES (?, ?, ?)', (_cache_key(pac), e.i, data))
+    except Exception:
+        pass            # кеш — лише прискорення: не вийшло записати — не біда
+
+
 class Pac:
     def __init__(self, path):
         self.path = path
@@ -139,8 +193,14 @@ class Pac:
                 raise KeyError(name)
         if not e.pack_size or not e.unpack_size:
             return b''
-        blob = self.read_raw(e, f)
-        return decompress(blob) if e.packed == 1 else blob[:e.unpack_size]
+        if e.packed != 1:
+            return self.read_raw(e, f)[:e.unpack_size]
+        got = _cache_get(self, e)
+        if got is not None:
+            return got
+        data = decompress(self.read_raw(e, f))
+        _cache_put(self, e, data)
+        return data
 
     def read_head(self, e, f=None):
         """Початок файлу (перший стиснений шматок) — швидко, для заголовків."""

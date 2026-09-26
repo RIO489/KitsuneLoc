@@ -18,7 +18,8 @@ Game.bra\\StringData і DATABASE — залишки рушія з іншої г�
 не експортуються. Інтерфейс гри — у TTM1.bra (Text\\*.bin, data\\table.enc),
 TextData*.bin підтримуються, table.enc — ні (стиснений контейнер, у роботі).
 """
-import argparse, os, sys, shutil
+import argparse, json, os, sys, shutil
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from maryskelter.bra import Bra
 from maryskelter.gbnl import Gbnl
@@ -399,6 +400,17 @@ def _export_atlas(a):
     blobs = _read_atlases(a, marks)
     prev = os.path.join(a.work_dir, '_атлас')
     os.makedirs(prev, exist_ok=True)
+    # прев'ю залежать лише від розмітки й оригінальних атласів: якщо ні те, ні
+    # інше не змінилось, текстури не розкодовуємо й картинки не переписуємо
+    import hashlib
+    h = hashlib.md5(json.dumps(marks, sort_keys=True, ensure_ascii=False).encode('utf-8'))
+    for src in sorted(blobs):
+        h.update(hashlib.md5(blobs[src]).digest())
+    sig_path = os.path.join(prev, '_відбиток.txt')
+    try:
+        same = open(sig_path, encoding='utf-8').read() == h.hexdigest()
+    except OSError:
+        same = False
     items, seen = [], {}
     for src, mark in marks.items():
         if src not in blobs:
@@ -413,24 +425,27 @@ def _export_atlas(a):
                 if where not in seen[k]['ctx'].split(', '):
                     seen[k]['ctx'] += ', ' + where
                 continue
-            if img is None:
-                img = dds.decode(bytes(atl.pair(cl3, mark.get('текстура'))[1][1]))
             box = atl.box_of(i, spec, boxes)
             if box is None:
                 print(f'  ! {where}: кадру {i} немає в нарізці')
                 continue
-            spr = img.crop(box)
-            pic = Image.new('RGBA', spr.size, (32, 32, 40, 255))
-            pic.alpha_composite(spr)
-            pic.thumbnail((260, 40))
             fn = os.path.join(prev, f'{len(items):04d}.png')
-            pic.convert('RGB').save(fn)
+            if not (same and os.path.exists(fn)):
+                if img is None:
+                    img = dds.decode(bytes(atl.pair(cl3, mark.get('текстура'))[1][1]))
+                spr = img.crop(box)
+                pic = Image.new('RGBA', spr.size, (32, 32, 40, 255))
+                pic.alpha_composite(spr)
+                pic.thumbnail((260, 40))
+                pic.convert('RGB').save(fn)
             it = {'id': k, 'src': spec['текст'], 'ctx': where, 'kind': 'text', 'preview': fn,
                   'hint': 'напис на картинці: кегль підбере програма; що довше за '
                           'оригінал — то дрібніше вийде'}
             seen[k] = it
             items.append(it)
     locfile.save_rich(a.work_dir, 'msk', ATLAS_SRC, 'atlas', items)
+    with open(sig_path, 'w', encoding='utf-8') as f:
+        f.write(h.hexdigest())
     return len(items)
 
 
@@ -448,7 +463,7 @@ def _import_atlas(a):
     styles = atl.load_json('стилі.json')
     out, n, warns = {}, 0, []
     for src, blob in _read_atlases(a, todo).items():
-        new, k, w = atl.rebuild(blob, marks[src], tr, styles)
+        new, k, w = atl.cached(src, blob, marks[src], tr, styles, atl.rebuild)
         warns += [f'{marks[src].get("назва", src)}, {x}' for x in w]
         if new:
             arc, name = _atlas_path(src)

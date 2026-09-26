@@ -15,6 +15,7 @@
 сцена трапляється. Гра має бути налаштована на мову тексту = слот.
 """
 import argparse, os, sys
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import UnityPy
 from crystar.unitystr import scan, rebuild

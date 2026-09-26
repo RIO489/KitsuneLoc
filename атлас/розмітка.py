@@ -13,6 +13,7 @@
 Картинки лягають у атлас/_огляд/. Гра береться з settings.json (ключ "msk").
 """
 import json, os, sys
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)

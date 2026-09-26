@@ -7,10 +7,11 @@
 Нічого вводити руками не треба.
 """
 import os, re, sys, json, time, shutil, threading, traceback, subprocess, queue
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.4.3'
+VERSION = '1.5'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -47,14 +48,44 @@ GAMES = {
 }
 
 # ---------------------------------------------------------------- теми вікна
+# Кольори підігнані під тему Sun Valley (sv-ttk, вигляд Windows 11); без неї
+# вікно малюється старою ручною темою з тими самими кольорами.
 THEMES = {
-    'light': dict(bg='#f5f5f5', fg='#1a1a1a', panel='#ffffff', logbg='#ffffff',
-                  logfg='#1a1a1a', dim='#6a6a6a', err='#b00020', warn='#8a6100',
-                  ok='#0a6b2e', accent='#1f4f82'),
-    'dark':  dict(bg='#22262b', fg='#e6e6e6', panel='#2b3036', logbg='#1b1f23',
+    'light': dict(bg='#fafafa', fg='#1c1c1c', panel='#ffffff', logbg='#ffffff',
+                  logfg='#1c1c1c', dim='#6a6a6a', err='#b00020', warn='#8a6100',
+                  ok='#0a6b2e', accent='#005fb8', link='#005fb8'),
+    'dark':  dict(bg='#1c1c1c', fg='#e6e6e6', panel='#2b2b2b', logbg='#202020',
                   logfg='#dfe3e6', dim='#8b949e', err='#ff7b72', warn='#e3b341',
-                  ok='#56d364', accent='#79b8ff'),
+                  ok='#56d364', accent='#57c8ff', link='#57c8ff'),
 }
+
+SOUNDS = os.path.join(HERE, 'звуки')
+
+
+def play(name):
+    """Звук кнопки (асинхронно; нема файлу чи звукової карти — мовчки)."""
+    p = os.path.join(SOUNDS, name)
+    if os.name != 'nt' or not os.path.exists(p):
+        return
+    try:
+        import winsound
+        winsound.PlaySound(p, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    except Exception:
+        pass
+
+
+def dark_titlebar(win, dark):
+    """Темний заголовок вікна на Windows 10/11 (DWMWA_USE_IMMERSIVE_DARK_MODE)."""
+    if os.name != 'nt':
+        return
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+        v = ctypes.c_int(1 if dark else 0)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(v), ctypes.sizeof(v))
+    except Exception:
+        pass
 
 
 class Cancelled(Exception):
@@ -137,6 +168,27 @@ def save_settings(s):
         pass
 
 
+def _same_drive(a, b):
+    """Чи на одному томі (тоді os.replace — перейменування, а не копія)."""
+    try:
+        return os.stat(a).st_dev == os.stat(os.path.dirname(b)).st_dev
+    except OSError:
+        return False
+
+
+def running(exe):
+    """Чи запущено зараз програму `exe` (Windows, через tasklist)."""
+    if os.name != 'nt':
+        return False
+    try:
+        r = subprocess.run(['tasklist', '/FI', f'IMAGENAME eq {exe}', '/FO', 'CSV', '/NH'],
+                           capture_output=True, text=True, timeout=10,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        return exe.lower() in r.stdout.lower()
+    except Exception:
+        return False
+
+
 def human(n):
     for unit in ('Б', 'КБ', 'МБ', 'ГБ'):
         if n < 1024 or unit == 'ГБ':
@@ -159,8 +211,8 @@ class App(tk.Tk):
 
         self.title(f'KitsuneLoc {VERSION} — Crystar / Mary Skelter / Neptunia')
         geo = self.settings.get('geometry')
-        self.geometry(geo if geo else '900x640')
-        self.minsize(820, 560)
+        self.geometry(geo if geo else '1000x720')
+        self.minsize(900, 660)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
         self._build()
@@ -206,19 +258,21 @@ class App(tk.Tk):
         wf = ttk.LabelFrame(self, text=' Робота ')
         wf.pack(fill='x', **pad)
         steps = ttk.Frame(wf); steps.pack(fill='x', padx=10, pady=(8, 10))
-        self.b1 = self._step_button(steps, '1. Дістати текст з гри',
-                                    'зібрати книги Excel', lambda: self._run(self.do_export))
+        self.b1 = self._step_button(steps, '1. Дістати текст з гри', 'зібрати книги Excel',
+                                    lambda: self._run(self.do_export, 'neptune.wav'), accent=True)
         self.b_open = self._step_button(steps, 'Відкрити теку з перекладом',
                                         'там лежать книги .xlsx', self.open_xlsx)
-        self.b2 = self._step_button(steps, '2. Залити переклад у гру',
-                                    'з резервною копією', lambda: self._run(self.do_import))
+        self.b2 = self._step_button(steps, '2. Залити переклад у гру', 'з резервною копією',
+                                    lambda: self._run(self.do_import, 'neptune-shy.wav'), accent=True)
         self.b3 = self._step_button(steps, '3. Запустити гру',
                                     'подивитись результат', self.launch)
 
         bk = ttk.Frame(wf); bk.pack(fill='x', padx=10, pady=(0, 10))
         ttk.Label(bk, text='Книга:').pack(side='left')
         self.book = tk.StringVar()
-        self.book_box = ttk.Combobox(bk, textvariable=self.book, state='readonly', width=34)
+        self.book_files = {}                     # підпис у списку -> ім'я файлу
+        self.book_pc = {}                        # шлях -> (час зміни, перекладено, усього)
+        self.book_box = ttk.Combobox(bk, textvariable=self.book, state='readonly', width=40)
         self.book_box.pack(side='left', padx=8)
         self.b_book = ttk.Button(bk, text='Відкрити книгу', command=self.open_book)
         self.b_book.pack(side='left')
@@ -243,6 +297,9 @@ class App(tk.Tk):
         self.b_copy.pack(side='right')
         self.b_theme = ttk.Button(row, text='Темна тема', command=self._toggle_theme)
         self.b_theme.pack(side='right', padx=8)
+        self.sound = tk.BooleanVar(value=self.settings.get('sound', True))
+        ttk.Checkbutton(row, text='Звуки', variable=self.sound,
+                        command=self._save_sound).pack(side='right', padx=(0, 4))
 
         self.buttons = [self.b1, self.b2, self.b3, self.b_open, self.b_book, self.b_pics,
                         self.b_prog, self.b_check, self.b_rest,
@@ -261,13 +318,20 @@ class App(tk.Tk):
         self.pb = ttk.Progressbar(self, mode='determinate')
         self.pb.pack(fill='x', padx=12, pady=(4, 6))
 
-        self.log = tk.Text(self, height=18, wrap='word', state='disabled',
+        lf = ttk.Frame(self); lf.pack(fill='both', expand=True, padx=12, pady=(0, 12))
+        self.log = tk.Text(lf, height=18, wrap='word', state='disabled',
                            relief='flat', borderwidth=6)
-        self.log.pack(fill='both', expand=True, padx=12, pady=(0, 12))
+        sb = ttk.Scrollbar(lf, orient='vertical', command=self.log.yview)
+        self.log.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        self.log.pack(side='left', fill='both', expand=True)
+        self.links = {}                          # тег у лозі -> (source, id, оригінал)
 
-    def _step_button(self, parent, text, hint, cmd):
+    def _step_button(self, parent, text, hint, cmd, accent=False):
         box = ttk.Frame(parent); box.pack(side='left', padx=(0, 10))
         b = ttk.Button(box, text=text, command=cmd)
+        if accent:
+            b.configure(style='Accent.TButton')
         b.pack(fill='x')
         ttk.Label(box, text=hint, style='Hint.TLabel').pack(anchor='w', pady=(2, 0))
         return b
@@ -276,12 +340,20 @@ class App(tk.Tk):
         c = THEMES[self.theme]
         st = ttk.Style()
         try:
-            st.theme_use('clam' if self.theme == 'dark' else
-                         ('vista' if 'vista' in st.theme_names() else 'clam'))
-        except tk.TclError:
-            pass
+            import sv_ttk
+        except ImportError:
+            sv_ttk = None
+        if sv_ttk is not None:
+            sv_ttk.set_theme(self.theme)
+        else:
+            try:
+                st.theme_use('clam' if self.theme == 'dark' else
+                             ('vista' if 'vista' in st.theme_names() else 'clam'))
+            except tk.TclError:
+                pass
+        dark_titlebar(self, self.theme == 'dark')
         self.configure(bg=c['bg'])
-        if self.theme == 'dark':
+        if sv_ttk is None and self.theme == 'dark':
             st.configure('.', background=c['bg'], foreground=c['fg'],
                          fieldbackground=c['panel'], bordercolor='#3a4048')
             st.configure('TLabelframe', background=c['bg'], bordercolor='#3a4048')
@@ -295,13 +367,18 @@ class App(tk.Tk):
         st.configure('Hint.TLabel', foreground=c['dim'], font=('Segoe UI', 8))
         self.b_theme.configure(text='Світла тема' if self.theme == 'dark' else 'Темна тема')
 
-        self.log.configure(bg=c['logbg'], fg=c['logfg'], insertbackground=c['fg'])
+        self.log.configure(bg=c['logbg'], fg=c['logfg'], insertbackground=c['fg'],
+                           font=('Segoe UI', 10))
         self.log.tag_configure('mono', font=('Consolas', 9))
         self.log.tag_configure('err', foreground=c['err'])
         self.log.tag_configure('warn', foreground=c['warn'])
         self.log.tag_configure('ok', foreground=c['ok'])
         self.log.tag_configure('dim', foreground=c['dim'])
         self.log.tag_configure('head', foreground=c['accent'], font=('Segoe UI', 10, 'bold'))
+        # попередження, що ведуть до рядка книги: підкреслені, клік відкриває книгу
+        self.log.tag_configure('link', underline=True)
+        self.log.tag_bind('link', '<Enter>', lambda e: self.log.configure(cursor='hand2'))
+        self.log.tag_bind('link', '<Leave>', lambda e: self.log.configure(cursor=''))
 
     def _toggle_theme(self):
         self.theme = 'dark' if self.theme == 'light' else 'light'
@@ -354,11 +431,47 @@ class App(tk.Tk):
         if os.path.isdir(xl):
             names = sorted(f for f in os.listdir(xl)
                            if f.endswith('.xlsx') and not f.startswith('~$'))
-        self.book_box['values'] = names
-        if names and self.book.get() not in names:
-            self.book.set(names[0])
-        if not names:
-            self.book.set('')
+        self._show_books(xl, names)
+        # відсотки рахуються у фоні: відкрити всі книги — кілька секунд
+        game = self.game.get()
+
+        def job():
+            changed = False
+            for fn in names:
+                p = os.path.join(xl, fn)
+                try:
+                    mt = os.path.getmtime(p)
+                    if self.book_pc.get(p, (None,))[0] == mt:
+                        continue
+                    import sheets
+                    done, total, _a = sheets.book_stats(p)
+                    self.book_pc[p] = (mt, done, total)
+                    changed = True
+                except Exception:
+                    continue
+            if changed:
+                self.q.put(('books', (game, xl, names)))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _show_books(self, xl, names):
+        """Список книг з відсотком готовності: «05 Сюжет 0003xx — 72%»."""
+        cur = self.book_file()
+        self.book_files = {}
+        for fn in names:
+            st = self.book_pc.get(os.path.join(xl, fn))
+            label = fn[:-5]
+            if st and st[2]:
+                pc = 100 * st[1] / st[2]
+                label += ' — ✓ 100%' if st[1] == st[2] else f' — {pc:.0f}%'
+            self.book_files[label] = fn
+        labels = list(self.book_files)
+        self.book_box['values'] = labels
+        keep = next((k for k, v in self.book_files.items() if v == cur), None)
+        self.book.set(keep or (labels[0] if labels else ''))
+
+    def book_file(self):
+        """Ім'я файлу вибраної книги (у списку — підпис з відсотком)."""
+        return self.book_files.get(self.book.get(), '')
 
     def _refresh_badge(self):
         """Що зараз лежить у грі — переклад чи оригінал (порівнюємо з backup)."""
@@ -406,6 +519,10 @@ class App(tk.Tk):
         self.settings['crystar_slot'] = self.slot.get()
         save_settings(self.settings)
 
+    def _save_sound(self):
+        self.settings['sound'] = self.sound.get()
+        save_settings(self.settings)
+
     # ------------------------------------------------------------------ лог
     def _open_log(self):
         try:
@@ -431,6 +548,11 @@ class App(tk.Tk):
     def say(self, text, tag=''):
         self.q.put(('log', (text, tag)))
 
+    def say_link(self, text, target, tag='warn'):
+        """Рядок логу, клік по якому відкриває книгу на потрібному рядку;
+        target = (source, id, оригінал)."""
+        self.q.put(('link', (text, tag, target)))
+
     def step(self, i, n, label=''):
         if self.cancel.is_set():
             raise Cancelled()
@@ -448,10 +570,18 @@ class App(tk.Tk):
         try:
             while True:
                 kind, val = self.q.get_nowait()
-                if kind == 'log':
-                    text, tag = val
+                if kind in ('log', 'link'):
+                    text, tag = val[:2]
+                    tags = (tag,)
+                    if kind == 'link':
+                        name = f'goto{len(self.links)}'
+                        self.links[name] = (self.game.get(),) + tuple(val[2])
+                        self.log.tag_bind(name, '<Button-1>',
+                                          lambda e, n=name: self._goto(self.links[n]))
+                        tags = (tag, 'link', name)
                     self.log.configure(state='normal')
-                    self.log.insert('end', text + '\n', tag)
+                    self.log.insert('end', text, tags)
+                    self.log.insert('end', '\n', tag)
                     self.log.see('end')
                     self.log.configure(state='disabled')
                     if self.logf:
@@ -459,6 +589,11 @@ class App(tk.Tk):
                             self.logf.write(text + '\n'); self.logf.flush()
                         except OSError:
                             pass
+                elif kind == 'books':
+                    game, xl, _names = val
+                    if game == self.game.get() and os.path.isdir(xl):
+                        self._show_books(xl, sorted(
+                            f for f in os.listdir(xl) if f.endswith('.xlsx') and not f.startswith('~$')))
                 elif kind == 'step':
                     i, n, label = val
                     self.pb['maximum'] = max(n, 1)
@@ -509,9 +644,11 @@ class App(tk.Tk):
             if mod is not None:
                 importlib.reload(mod)
 
-    def _run(self, fn):
+    def _run(self, fn, sound=None):
         if self.busy:
             return
+        if sound and self.sound.get():
+            play(sound)
         self._snap()
         try:
             self._fresh()
@@ -575,7 +712,8 @@ class App(tk.Tk):
         self.destroy()
 
     DEPS = (('openpyxl', 'openpyxl'), ('UnityPy', 'UnityPy'), ('PIL', 'Pillow'),
-            ('texture2ddecoder', 'texture2ddecoder'), ('etcpak', 'etcpak'))
+            ('texture2ddecoder', 'texture2ddecoder'), ('etcpak', 'etcpak'),
+            ('sv_ttk', 'sv-ttk'))
 
     def _check_deps(self):
         import importlib.util
@@ -717,9 +855,14 @@ class App(tk.Tk):
             sheets.read_into_work(xl, work)
         self.say('Збираю книги Excel…')
         made = sheets.export(work, xl, g, progress=self.step)
+        same = set(getattr(sheets.export, 'unchanged', []))
         for p, n in made:
+            if os.path.basename(p) in same:
+                continue
             extra = f' (автоматично підставлено {n})' if n else ''
             self.say(f'  {os.path.basename(p)}{extra}', 'dim')
+        if same:
+            self.say(f'  без змін, не переписано: {len(same)} книг', 'dim')
         for f in getattr(sheets.export, 'skipped', []):
             self.say(f'  ! {f} не оновлено — відкрита в Excel. Закрий і натисни «1» ще раз.', 'warn')
         done, total = __import__('common').stats(work)
@@ -738,6 +881,7 @@ class App(tk.Tk):
             self.say('Увага: в Excel відкрито ' + ', '.join(busy) +
                      '. Беру те, що збережено на диску — незбережені зміни не потраплять у гру.',
                      'warn')
+        self._require_closed()
         self._check_space()
         self._require_originals()
         self.say('Читаю переклад з Excel…')
@@ -748,9 +892,8 @@ class App(tk.Tk):
             raise RuntimeError('У книгах немає жодного перекладу — нема чого заливати.')
         warn = sheets.validate(work)
         if warn:
-            self.say(f'\nПопереджень: {len(warn)} (перші 10)', 'warn')
-            for s, i, w in warn[:10]:
-                self.say(f'  {s} [{i}] — {w}', 'warn')
+            self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок у книзі)', 'warn')
+            self._say_warnings(warn, 10)
         self.say('\nЗбираю файли гри…')
         self.set_status('Перепаковую…')
         shutil.rmtree(out, ignore_errors=True)
@@ -774,6 +917,13 @@ class App(tk.Tk):
         self.set_status(f'Готово. У грі замінено файлів: {n}.')
         self.say(f'\nЗамінено файлів: {n}. Оригінали збережено в {bk}.\n'
                  'Тепер тисни «3. Запустити гру».', 'ok')
+
+    def _require_closed(self):
+        """Гра відкрита — Windows може дозволити підмінити архів, але гра й далі
+        працюватиме зі старим (так було з Neptunia). Краще зупинитись одразу."""
+        exe = GAMES[self.cur['game']]['exe']
+        if running(exe):
+            raise RuntimeError(f'Гра зараз запущена ({exe}). Закрий її і натисни кнопку ще раз.')
 
     def _check_space(self):
         """Чи вистачить місця на перепакування (робоча копія + копія в грі)."""
@@ -826,8 +976,13 @@ class App(tk.Tk):
                 shutil.copy2(dst, keep)
             tmp = dst + '.new'
             try:
-                shutil.copy2(src, tmp)
-                os.replace(tmp, dst)
+                if _same_drive(src, dst):
+                    # той самий диск — просто переносимо готовий файл (миттєво,
+                    # без ще одного запису сотень МБ); out\ після цього не потрібен
+                    os.replace(src, dst)
+                else:
+                    shutil.copy2(src, tmp)           # інший диск — копія й підміна
+                    os.replace(tmp, dst)
             except OSError as ex:
                 if os.path.exists(tmp):
                     try:
@@ -842,6 +997,7 @@ class App(tk.Tk):
 
     def do_restore(self):
         _w, _x, _o, bk = self.dirs()
+        self._require_closed()
         if not os.path.isdir(bk):
             raise RuntimeError('Резервних копій немає.')
         dest, n = self.data_dir(), 0
@@ -889,12 +1045,71 @@ class App(tk.Tk):
         if not warn:
             self.say('Попереджень немає — усе чисто.', 'ok')
         else:
-            self.say(f'Попереджень: {len(warn)}', 'warn')
-            for s, i, w in warn[:40]:
-                self.say(f'  {s} [{i}] — {w}', 'warn')
-            if len(warn) > 40:
-                self.say(f'  …і ще {len(warn) - 40}', 'warn')
+            self.say(f'Попереджень: {len(warn)} (клік по рядку — відкрити його в книзі)', 'warn')
+            self._say_warnings(warn, 200)
         self.set_status(f'Перекладено {done}/{total}.')
+
+    def _say_warnings(self, warn, limit):
+        import sheets
+        src = getattr(sheets.validate, 'src', {})
+        for s, i, w in warn[:limit]:
+            self.say_link(f'  {s} [{i}] — {w}', (s, i, src.get((s, i))))
+        if len(warn) > limit:
+            self.say(f'  …і ще {len(warn) - limit}', 'warn')
+
+    def _goto(self, target):
+        """Клік по попередженню: відкрити книгу на рядку з цим перекладом."""
+        game, source, eid, src = target
+        if self.busy:
+            self.set_status('Зачекай, поки закінчиться поточна дія.')
+            return
+        xl = os.path.join(XLSX, GAMES[game]['folder'])
+        self.set_status('Шукаю рядок у книгах…')
+
+        def job():
+            import sheets
+            try:
+                loc = sheets.locate(xl, game, source, eid, src)
+            except Exception as ex:
+                self.set_status(f'Не вдалося знайти рядок: {ex}')
+                return
+            if not loc:
+                self.set_status('Такого рядка в книгах немає — натисни «1», щоб перезібрати книги.')
+                return
+            path, sheet, cell = loc
+            name = os.path.basename(path)
+            if os.path.exists(os.path.join(xl, '~$' + name)):
+                ok = self._excel_goto(path, sheet, cell)       # книга вже відкрита в Excel
+                self.set_status(f'{name[:-5]}: аркуш «{sheet}», клітинка {cell}' +
+                                ('' if ok else ' (книга вже відкрита — перейди туди сам)'))
+                return
+            try:
+                sheets.goto_cell(path, sheet, cell)
+            except Exception as ex:
+                self.say(f'Не вдалося позначити рядок у книзі: {ex}', 'dim')
+            self._open_path(path)
+            self.set_status(f'Відкриваю {name[:-5]}: аркуш «{sheet}», клітинка {cell}.')
+        threading.Thread(target=job, daemon=True).start()
+
+    @staticmethod
+    def _excel_goto(path, sheet, cell):
+        """Перейти до клітинки в уже відкритій книзі Excel (через COM з PowerShell)."""
+        if os.name != 'nt':
+            return False
+        ps = ("$ErrorActionPreference='Stop';"
+              "$xl=[Runtime.InteropServices.Marshal]::GetActiveObject('Excel.Application');"
+              "foreach($w in $xl.Workbooks){if($w.FullName -eq $env:KL_BOOK){"
+              "$w.Activate();$s=$w.Worksheets.Item($env:KL_SHEET);$s.Activate();"
+              "$xl.Goto($s.Range($env:KL_CELL),$false);"
+              "(New-Object -ComObject WScript.Shell).AppActivate($xl.Caption)|Out-Null;exit 0}};exit 1")
+        env = dict(os.environ, KL_BOOK=os.path.abspath(path), KL_SHEET=sheet, KL_CELL=cell)
+        try:
+            r = subprocess.run(['powershell', '-NoProfile', '-NonInteractive', '-Command', ps],
+                               env=env, capture_output=True, timeout=20,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            return r.returncode == 0
+        except Exception:
+            return False
 
     def _capture(self, fn):
         """Перехопити print() зі скриптів у лог."""
@@ -940,7 +1155,7 @@ class App(tk.Tk):
     def open_book(self):
         self._snap()
         _w, xl, _o, _b = self.dirs()
-        name = self.book.get()
+        name = self.book_file()
         if not name:
             messagebox.showinfo('Немає книг',
                                 'Спочатку натисни «1. Дістати текст з гри».')

@@ -22,6 +22,7 @@
 тож індекси data/*.cpk (ім'я -> номер запису) лишаються дійсними.
 """
 import argparse, glob, os, re, sys
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from neptunia.pac import Pac
 from neptunia.gbnl import Gbnl
@@ -436,7 +437,7 @@ def _import_atlas(a):
     styles = atl.load_json('стилі.json')
     out, n, warns = {}, 0, []
     for src, blob in _atlas_blobs(a, todo).items():
-        new, k, w = natl.rebuild(blob, marks[src], tr, styles)
+        new, k, w = atl.cached(src, blob, marks[src], tr, styles, natl.rebuild)
         warns += [f'{marks[src].get("назва", src)}, {x}' for x in w]
         if new:
             arc, inner = natl.split_src(src)

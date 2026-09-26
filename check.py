@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Швидка самоперевірка: експорт -> підміна одного рядка -> імпорт -> читання назад."""
 import os, sys, json, glob, shutil, subprocess
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)

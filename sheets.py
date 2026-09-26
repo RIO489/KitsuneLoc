@@ -316,7 +316,9 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
         row += [tr, e.get('note', ''), hint, auto]
         target.append(row)
         rowno[id(target)] = r
-        cells = target[r]
+        # не target[r]: openpyxl тоді щоразу шукає max_column перебором УСІХ
+        # клітинок аркуша — на великих книгах це було 3/4 часу кроку «1»
+        cells = [target.cell(row=r, column=k + 1) for k in range(len(row))]
         if has_pic and e.get('preview') and os.path.exists(e['preview']):
             from openpyxl.drawing.image import Image as XLImage
             pic = XLImage(e['preview'])
@@ -391,14 +393,30 @@ def export(work_dir, xlsx_dir, game, autofill=True, progress=None):
             tr0, ja0 = names.get(e['src'], ('', ''))
             names[e['src']] = (tr0 or e.get('tr', ''), ja0 or e.get('ja', ''))
     skipped = []
+    sigs_path = os.path.join(work_dir, BOOK_SIGS)
+    try:
+        sigs = json.load(open(sigs_path, encoding='utf-8'))
+    except (OSError, ValueError):
+        sigs = {}
+    base = _code_sig() + (json.dumps(tagdict, sort_keys=True, ensure_ascii=False) if tagdict else '')
+    unchanged = []
 
     def safe(path, *args, **kw):
+        # усе, з чого складається книга, не змінилось — не переписуємо (це
+        # десятки секунд на великих книгах і зайвий запис на диск)
+        fn = os.path.basename(path)
+        sig = _book_sig(base, args, kw)
+        if sigs.get(fn, {}).get('sig') == sig and os.path.exists(path):
+            unchanged.append(fn)
+            return sigs[fn].get('auto', 0)
         # книга відкрита в Excel -> Windows не дає її переписати; пропускаємо лише її
         try:
-            return write_book(path, *args, **kw)
+            n = write_book(path, *args, **kw)
         except PermissionError:
-            skipped.append(os.path.basename(path))
+            skipped.append(fn)
             return None
+        sigs[fn] = {'sig': sig, 'auto': n}
+        return n
 
     if names:
         path = os.path.join(xlsx_dir, NAMES_BOOK + '.xlsx')
@@ -413,8 +431,47 @@ def export(work_dir, xlsx_dir, game, autofill=True, progress=None):
         if progress:
             progress(i + 1, len(books), name)
     prune_stale(xlsx_dir, [p for p, _n in made])
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        json.dump(sigs, open(sigs_path, 'w', encoding='utf-8'), ensure_ascii=False, indent=0)
+    except OSError:
+        pass
     export.skipped = skipped
+    export.unchanged = unchanged
     return made
+
+
+BOOK_SIGS = '_книги.sig'            # у work\<гра>: відбиток даних кожної книги на час запису
+
+
+def _code_sig():
+    """Змінився код, що складає книги, — книги переписуються всі."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    out = []
+    for p in ('sheets.py', os.path.join('crystar', 'tags.py'), os.path.join('maryskelter', 'chars.py')):
+        try:
+            out.append(str(os.path.getmtime(os.path.join(here, p))))
+        except OSError:
+            out.append('0')
+    return '|'.join(out)
+
+
+def _book_sig(base, args, kw):
+    """md5 усього, з чого write_book складає книгу (разом з картинками-прев'ю)."""
+    import hashlib
+    h = hashlib.md5(base.encode('utf-8'))
+    game, book, autofill = args[0], args[1], args[2]
+    h.update(json.dumps([game, autofill, kw.get('has_ja'), kw.get('names_only')],
+                        ensure_ascii=False, sort_keys=True).encode('utf-8'))
+    for source, entries in book:
+        h.update(source.encode('utf-8'))
+        h.update(json.dumps(entries, ensure_ascii=False, sort_keys=True).encode('utf-8'))
+        for e in entries:
+            if e.get('preview') and os.path.exists(e['preview']):
+                # вміст, а не час: прев'ю перемальовуються при кожному експорті
+                with open(e['preview'], 'rb') as f:
+                    h.update(hashlib.md5(f.read()).digest())
+    return h.hexdigest()
 
 
 def prune_stale(xlsx_dir, keep):
@@ -434,13 +491,15 @@ def prune_stale(xlsx_dir, keep):
 
 
 # ----------------------------------------------------------------- читання XLSX
-def read_into_work(xlsx_dir, work_dir, progress=None):
-    """Перенести переклади з усіх .xlsx назад у JSON."""
-    trans, names_all, notes, autos, rows = {}, {}, {}, {}, 0
-    books = sorted(f for f in os.listdir(xlsx_dir)
-                   if f.endswith('.xlsx') and not f.startswith('~$'))
-    for k, fn in enumerate(books):
-        wb = load_workbook(os.path.join(xlsx_dir, fn), read_only=True, data_only=True)
+BOOK_CACHE_V = 1                    # змінилось те, що читаємо з книги, — +1
+BOOK_CACHE = '_книги.cache'         # у work\<гра>: прочитане з книг (за часом зміни й розміром)
+
+
+def _read_book(path):
+    """[(файл, id, переклад, авто | None, примітка | None)] з усіх аркушів книги."""
+    out = []
+    wb = load_workbook(path, read_only=True, data_only=True)
+    try:
         for ws in wb.worksheets:
             it = ws.iter_rows(values_only=True)
             head = next(it, None)
@@ -452,24 +511,71 @@ def read_into_work(xlsx_dir, work_dir, progress=None):
             for r in it:
                 if not r or not r[i_s]:
                     continue
-                rows += 1
                 tr = r[i_t]
                 # Excel — джерело правди: порожня клітинка = перекладу немає
                 # (так прибраний у книзі переклад прибирається і з гри)
                 tr = tr.replace('\r\n', '\n').strip() if isinstance(tr, str) else ''
-                if r[i_s] == NAMES:
-                    names_all.setdefault(str(r[i_i]), []).append(tr)
-                else:
-                    trans.setdefault(r[i_s], {}).setdefault(str(r[i_i]), []).append(tr)
-                    if i_a is not None:
-                        autos.setdefault(r[i_s], {})[str(r[i_i])] = r[i_a] or ''
-                    if i_n is not None:
-                        n = r[i_n] if isinstance(r[i_n], str) else ''
-                        n = '' if n.strip() in AUTO_NOTES else n.strip()
-                        notes.setdefault(r[i_s], {})[str(r[i_i])] = n
+                au = (r[i_a] or '') if i_a is not None else None
+                n = None
+                if i_n is not None:
+                    n = r[i_n] if isinstance(r[i_n], str) else ''
+                    n = '' if n.strip() in AUTO_NOTES else n.strip()
+                out.append((r[i_s], str(r[i_i]), tr, au, n))
+    finally:
         wb.close()
+    return out
+
+
+def _book_cache(work_dir):
+    import pickle
+    try:
+        with open(os.path.join(work_dir, BOOK_CACHE), 'rb') as f:
+            c = pickle.load(f)
+        return c if isinstance(c, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_book_cache(work_dir, cache):
+    import pickle
+    try:
+        os.makedirs(work_dir, exist_ok=True)
+        p = os.path.join(work_dir, BOOK_CACHE)
+        with open(p + '.tmp', 'wb') as f:
+            pickle.dump(cache, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(p + '.tmp', p)
+    except OSError:
+        pass
+
+
+def read_into_work(xlsx_dir, work_dir, progress=None):
+    """Перенести переклади з усіх .xlsx назад у JSON."""
+    trans, names_all, notes, autos, rows = {}, {}, {}, {}, 0
+    books = sorted(f for f in os.listdir(xlsx_dir)
+                   if f.endswith('.xlsx') and not f.startswith('~$'))
+    cache, read_now = _book_cache(work_dir), {}
+    for k, fn in enumerate(books):
+        path = os.path.join(xlsx_dir, fn)
+        st = os.stat(path)
+        sig = (BOOK_CACHE_V, st.st_mtime_ns, st.st_size)
+        got = cache.get(fn)
+        # книгу, що не змінилась з минулого читання, не розбираємо вдруге
+        book_rows = got[1] if got and tuple(got[0]) == sig else _read_book(path)
+        read_now[fn] = (sig, book_rows)
+        for src, eid, tr, au, n in book_rows:
+            rows += 1
+            if src == NAMES:
+                names_all.setdefault(eid, []).append(tr)
+            else:
+                trans.setdefault(src, {}).setdefault(eid, []).append(tr)
+                if au is not None:
+                    autos.setdefault(src, {})[eid] = au
+                if n is not None:
+                    notes.setdefault(src, {})[eid] = n
         if progress:
             progress(k + 1, len(books), fn)
+    if read_now != cache:
+        _save_book_cache(work_dir, read_now)
     # Одне ім'я може траплятися в кількох книгах (старі книги мали «Імена» в кожній).
     # Заповнене завжди перемагає порожнє; якщо заповнених різних кілька — беремо
     # те, що відрізняється від уже збереженого (тобто свіжу правку).
@@ -542,16 +648,62 @@ def read_into_work(xlsx_dir, work_dir, progress=None):
 
 
 # ------------------------------------------------------------------- перевірки
-def validate(work_dir):
+_DIALOG = re.compile(r'/event/script/|/EVENT/DATA/', re.I)
+
+
+def _width_group(doc, e):
+    """Рядки однієї групи показуються в одному й тому ж місці екрана, тож
+    найширший оригінал групи — оцінка ширини цього місця. Діалоги — одне
+    вікно на всю гру; поля таблиць Neptunia — за зсувом поля в записі; поля
+    таблиць Mary Skelter — за місткістю слота (однакові поля — однаковий ліміт)."""
+    src = doc['source']
+    if _DIALOG.search(src):
+        return ('діалог',)
+    m = re.match(r'^\d+[.:](\d+)$', e['id'])
+    if m:
+        return (src, 'поле', m.group(1))
+    if e.get('cap'):
+        return (src, 'слот', e['cap'])
+    return None
+
+
+def _nlines(s):
+    """Кількість рядків; переноси по краях не рахуються — імпорт повертає їх з оригіналу."""
+    return s.strip().count('\n') + 1
+
+
+def _backup_of(work_dir):
+    """work\\<гра> -> backup\\<гра> (обидві теки лежать поруч у корені програми)."""
+    w = os.path.abspath(work_dir)
+    return os.path.join(os.path.dirname(os.path.dirname(w)), 'backup', os.path.basename(w))
+
+
+def validate(work_dir, backup_dir=None):
     warn = []
+    validate.src = {}                       # (source, id) -> оригінал: для переходу до рядка
     files = collect(work_dir)
     tagdict = tags.build_dict(files) if any(s.startswith('parameter/') for s, _ in files) else None
-    for p in sorted(locfile.walk(work_dir)):
-        doc = locfile.load_json(p)
-        if not doc:
-            continue
-        if doc.get('format') == 'atlas':
-            continue        # написи на картинках малюємо самі: шрифт гри й ліміти тут не діють
+    docs = [d for d in (locfile.load_json(p) for p in sorted(locfile.walk(work_dir))) if d]
+    docs = [d for d in docs if d.get('format') != 'atlas']   # написи малюємо самі: ліміти тут не діють
+
+    # ширина в пікселях за шрифтом гри (якщо його вдалося прочитати)
+    import metrics
+    game = next((d.get('game') for d in docs), None)
+    wtab = metrics.table(game, backup_dir or _backup_of(work_dir),
+                         os.path.dirname(os.path.abspath(work_dir))) if game else None
+    # по групах (див. _width_group): найширший рядок і найбільше рядків в оригіналах
+    gmax, gcount, glines = {}, {}, {}
+    for doc in docs:
+        for e in doc['entries']:
+            g = _width_group(doc, e)
+            if g is None:
+                continue
+            gcount[g] = gcount.get(g, 0) + 1
+            glines[g] = max(glines.get(g, 0), _nlines(e['src']))
+            if wtab:
+                w = max(metrics.width(x, wtab, game) for x in e['src'].split('\n'))
+                gmax[g] = max(gmax.get(g, 0), w)
+    for doc in docs:
         enc = doc.get('encoding')
         is_cry = doc.get('game') == 'crystar'
         for e in doc['entries']:
@@ -559,15 +711,39 @@ def validate(work_dir):
             if not tr:
                 continue
             src = e['src']
-            if src.count('\n') != tr.count('\n'):
-                warn.append((doc['source'], e['id'],
-                             f"переносів рядка: було {src.count(chr(10)) + 1}, "
-                             f"стало {tr.count(chr(10)) + 1}"))
-            for a, b in zip(src.split('\n'), tr.split('\n')):
-                if len(b) > max(len(a) + 6, len(a) * 1.35):
+            validate.src[(doc['source'], e['id'])] = src
+            g = _width_group(doc, e)
+            n_src, n_tr = _nlines(src), _nlines(tr)
+            if g is not None and (g == ('діалог',) or gcount.get(g, 0) >= 5):
+                # переносити можна по-своєму — аби рядків не стало більше, ніж уміщає місце
+                if n_tr > glines[g]:
+                    where = 'вікно діалогу вміщає' if g == ('діалог',) else 'в оригіналах цього поля'
                     warn.append((doc['source'], e['id'],
-                                 f'рядок довший за оригінал: {len(a)} -> {len(b)} символів'))
-                    break
+                                 f'рядків {n_tr} — {where} не більше {glines[g]}'))
+            elif n_src != n_tr:
+                warn.append((doc['source'], e['id'],
+                             f"переносів рядка: було {n_src}, стало {n_tr}"))
+            if wtab:
+                g = _width_group(doc, e)
+                wsrc = [metrics.width(x, wtab, game) for x in src.split('\n')]
+                wtr = [metrics.width(x, wtab, game) for x in tr.split('\n')]
+                if g == ('діалог',):
+                    lim = gmax[g]
+                elif g is not None and gcount.get(g, 0) >= 5:
+                    lim = max(gmax[g], max(wsrc) * 1.1)
+                else:
+                    lim = max(max(wsrc) * 1.35, max(wsrc) + 6 * (wtab.get('n') or 12))
+                if max(wtr) > lim:
+                    where = 'вікно діалогу' if g == ('діалог',) else 'місце на екрані'
+                    warn.append((doc['source'], e['id'],
+                                 f'рядок ширший за {where}: {max(wtr)} px при межі {round(lim)} px '
+                                 f'(оригінал {max(wsrc)} px) — перенеси рядок або скороти'))
+            else:
+                for a, b in zip(src.split('\n'), tr.split('\n')):
+                    if len(b) > max(len(a) + 6, len(a) * 1.35):
+                        warn.append((doc['source'], e['id'],
+                                     f'рядок довший за оригінал: {len(a)} -> {len(b)} символів'))
+                        break
             if doc.get('game') == 'msk':
                 bad = mchars.missing(tr)
                 if bad:
@@ -637,29 +813,7 @@ def progress(xlsx_dir, work_dir=None):
         return {'books': [], 'done': 0, 'total': 0, 'auto': 0, 'prev': None}
     for fn in sorted(f for f in os.listdir(xlsx_dir)
                      if f.endswith('.xlsx') and not f.startswith('~$')):
-        b_done = b_total = b_auto = 0
-        wb = load_workbook(os.path.join(xlsx_dir, fn), read_only=True, data_only=True)
-        for ws in wb.worksheets:
-            it = ws.iter_rows(values_only=True)
-            head = next(it, None)
-            if not head or COL_SRC not in head or COL_TR not in head:
-                continue
-            i_s, i_t = head.index(COL_SRC), head.index(COL_TR)
-            i_n = head.index(COL_NOTE) if COL_NOTE in head else None
-            i_a = head.index(COL_AUTO) if COL_AUTO in head else None
-            for r in it:
-                if not r or not r[i_s]:
-                    continue
-                b_total += 1
-                tr = r[i_t].strip() if isinstance(r[i_t], str) else ''
-                if not tr:
-                    continue
-                b_done += 1
-                a = r[i_a] if i_a is not None and isinstance(r[i_a], str) else ''
-                n = r[i_n] if i_n is not None and isinstance(r[i_n], str) else ''
-                if a and tr == a.strip() and not n.strip():
-                    b_auto += 1
-        wb.close()
+        b_done, b_total, b_auto = book_stats(os.path.join(xlsx_dir, fn))
         if b_total:
             books.append({'book': fn[:-5], 'done': b_done,
                           'total': b_total, 'auto': b_auto})
@@ -668,6 +822,137 @@ def progress(xlsx_dir, work_dir=None):
     if work_dir:
         res['prev'] = _snapshot(work_dir, done, total)
     return res
+
+
+def book_stats(path):
+    """(перекладено, усього, підставлено автоматично й не перевірено) в одній книзі."""
+    b_done = b_total = b_auto = 0
+    wb = load_workbook(path, read_only=True, data_only=True)
+    for ws in wb.worksheets:
+        it = ws.iter_rows(values_only=True)
+        head = next(it, None)
+        if not head or COL_SRC not in head or COL_TR not in head:
+            continue
+        i_s, i_t = head.index(COL_SRC), head.index(COL_TR)
+        i_n = head.index(COL_NOTE) if COL_NOTE in head else None
+        i_a = head.index(COL_AUTO) if COL_AUTO in head else None
+        for r in it:
+            if not r or not r[i_s]:
+                continue
+            b_total += 1
+            tr = r[i_t].strip() if isinstance(r[i_t], str) else ''
+            if not tr:
+                continue
+            b_done += 1
+            a = r[i_a] if i_a is not None and isinstance(r[i_a], str) else ''
+            n = r[i_n] if i_n is not None and isinstance(r[i_n], str) else ''
+            if a and tr == a.strip() and not n.strip():
+                b_auto += 1
+    wb.close()
+    return b_done, b_total, b_auto
+
+
+# ------------------------------------------------------ перехід до рядка книги
+def locate(xlsx_dir, game, source, eid, src=None):
+    """Де в книгах лежить рядок: (шлях книги, аркуш, номер рядка) або None.
+    Спершу — книга за правилами розкладки, далі книга «Імена» (ім'я мовця
+    там один раз, ключ — сам англійський текст), далі всі інші."""
+    if not os.path.isdir(xlsx_dir):
+        return None
+    rules = [(re.compile(rx), name) for rx, name in book_rules(game)]
+    first = next((n for rx, n in rules if rx.search(source)), OTHER_BOOK) + '.xlsx'
+    books = [f for f in sorted(os.listdir(xlsx_dir))
+             if f.endswith('.xlsx') and not f.startswith('~$')]
+    order = ([first] if first in books else []) + \
+            ([NAMES_BOOK + '.xlsx'] if NAMES_BOOK + '.xlsx' in books and src else []) + \
+            [f for f in books if f != first and f != NAMES_BOOK + '.xlsx']
+    for fn in order:
+        want = (NAMES, src) if fn == NAMES_BOOK + '.xlsx' else (source, eid)
+        wb = load_workbook(os.path.join(xlsx_dir, fn), read_only=True)
+        try:
+            for ws in wb.worksheets:
+                it = ws.iter_rows(values_only=True)
+                head = next(it, None)
+                if not head or COL_SRC not in head or COL_ID not in head:
+                    continue
+                i_f, i_i = head.index(COL_SRC), head.index(COL_ID)
+                for k, r in enumerate(it, 2):
+                    if r and r[i_f] == want[0] and str(r[i_i]) == str(want[1]):
+                        col = get_column_letter(head.index(COL_TR) + 1) if COL_TR in head else 'A'
+                        return os.path.join(xlsx_dir, fn), ws.title, f'{col}{k}'
+        finally:
+            wb.close()
+    return None
+
+
+def _xml_attr(tag, name, value):
+    """Поставити атрибут у відкривальний тег XML (рядком — без перезапису
+    простору імен, який Excel не любить)."""
+    if value is None:
+        return re.sub(rf'\s{name}="[^"]*"', '', tag)
+    if re.search(rf'\s{name}="', tag):
+        return re.sub(rf'(\s{name}=")[^"]*"', rf'\g<1>{value}"', tag)
+    end = '/>' if tag.endswith('/>') else '>'
+    return tag[:-len(end)] + f' {name}="{value}"' + end
+
+
+def goto_cell(path, sheet, cell):
+    """Зробити так, щоб книга відкрилась на аркуші `sheet` з виділеною
+    клітинкою `cell`: правимо лише вигляд (workbook.xml і sheetView аркуша)
+    прямо в архіві .xlsx — openpyxl при перезаписі губить картинки."""
+    import zipfile
+    m = re.match(r'([A-Z]+)(\d+)$', cell)
+    col, row = m.group(1), int(m.group(2))
+    with zipfile.ZipFile(path) as z:
+        items = [(i, z.read(i.filename)) for i in z.infolist()]
+    parts = {i.filename: d for i, d in items}
+    wbx = parts['xl/workbook.xml'].decode('utf-8')
+    rels = parts['xl/_rels/workbook.xml.rels'].decode('utf-8')
+    from xml.sax.saxutils import escape
+    tabs = re.findall(r'<(?:\w+:)?sheet\b[^>]*>', wbx)
+    idx = next(k for k, t in enumerate(tabs) if f'name="{escape(sheet)}"' in t)
+    targets = []
+    for t in tabs:
+        rid = re.search(r'\br:id="([^"]+)"|\bid="([^"]+)"', t)
+        rid = rid.group(1) or rid.group(2)
+        rel = re.search(rf'<Relationship\b[^>]*\bId="{rid}"[^>]*>', rels).group(0)
+        tg = re.search(r'Target="([^"]+)"', rel).group(1)
+        targets.append(tg.lstrip('/') if tg.startswith('/') else 'xl/' + tg)
+    wbx = re.sub(r'<(?:\w+:)?workbookView\b[^>]*>',
+                 lambda mm: _xml_attr(_xml_attr(mm.group(0), 'activeTab', idx), 'firstSheet', None),
+                 wbx, count=1)
+    parts['xl/workbook.xml'] = wbx.encode('utf-8')
+    for k, name in enumerate(targets):
+        x = parts[name].decode('utf-8')
+        x = re.sub(r'<(?:\w+:)?sheetView\b[^>]*>',
+                   lambda mm: _xml_attr(mm.group(0), 'tabSelected', 1 if k == idx else None), x)
+        if k == idx:
+            pane = re.search(r'<(?:\w+:)?pane\b[^>]*/>', x)
+            ysplit = int(float(re.search(r'ySplit="([\d.]+)"', pane.group(0)).group(1))) \
+                if pane and 'ySplit=' in pane.group(0) else 0
+            top = max(ysplit + 1, row - 3)
+            where = f'{col}{row}'
+            x = re.sub(r'<(?:\w+:)?selection\b[^>]*/>', '', x)
+            if pane:
+                active = re.search(r'activePane="([^"]+)"', pane.group(0))
+                active = active.group(1) if active else 'bottomRight'
+                xs = re.search(r'xSplit="([\d.]+)"', pane.group(0))
+                left = get_column_letter(int(float(xs.group(1))) + 1) if xs else 'A'
+                new = _xml_attr(pane.group(0), 'topLeftCell', f'{left}{top}')
+                x = x.replace(pane.group(0), new +
+                              f'<selection pane="{active}" activeCell="{where}" sqref="{where}"/>', 1)
+            else:
+                sv = re.search(r'<sheetView\b[^>]*>', x).group(0)
+                new = _xml_attr(sv, 'topLeftCell', f'A{top}')
+                sel = f'<selection activeCell="{where}" sqref="{where}"/>'
+                new = new[:-2] + '>' + sel + '</sheetView>' if new.endswith('/>') else new + sel
+                x = x.replace(sv, new, 1)
+        parts[name] = x.encode('utf-8')
+    tmp = path + '.new'
+    with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as z:
+        for info, _d in items:
+            z.writestr(info, parts[info.filename])
+    os.replace(tmp, path)
 
 
 def _snapshot(work_dir, done, total):

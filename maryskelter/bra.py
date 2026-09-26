@@ -10,7 +10,7 @@ index (from index_offset), one variable-length record per file:
     u32 mtime(unix), u32 crc32(raw), u32 stored(=16+comp), u32 raw_size,
     u16 name_len(padded to 4), u16 0x20, u32 blob_offset, name bytes
 """
-import struct, zlib, time, os
+import mmap, struct, zlib, time, os
 
 HDR = b'PDA\x00'
 ENT = struct.Struct('<IIIIHHI')
@@ -35,8 +35,10 @@ class Entry:
 class Bra:
     def __init__(self, path):
         self.path = path
+        # не читаємо архів у пам'ять цілком (TTM1 — 400 МБ, TTM3 — 576 МБ):
+        # відображаємо файл, і система підвантажує лише те, що справді читаємо
         with open(path, 'rb') as f:
-            self.data = f.read()
+            self.data = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
         magic, self.version, self.index_off, self.count = struct.unpack_from('<4sIII', self.data, 0)
         if magic != HDR:
             raise ValueError(f'{path}: not a PDA archive ({magic!r})')
@@ -113,9 +115,10 @@ class Bra:
     def repack(self, out_path, replacements=None, level=9, progress=None):
         """Write a new archive; `replacements` maps name -> new raw bytes."""
         repl = {k.replace('/', '\\').lower(): v for k, v in (replacements or {}).items()}
-        blobs, index, off = [], [], 16
+        # 1) індекс і стиснені заміни (у пам'яті — лише вони, не весь архів)
+        plan, index, off = [], [], 16
         now = int(time.time())
-        for i, e in enumerate(self.entries):
+        for e in self.entries:
             key = e.name.replace('/', '\\').lower()
             if key in repl:
                 raw = repl[key]
@@ -123,10 +126,10 @@ class Bra:
                 crc, mtime = zlib.crc32(raw) & 0xffffffff, now
                 blob = struct.pack('<IIIHH', len(raw), len(comp), crc, 6, e.flags) + comp
                 raw_size, stored = len(raw), 16 + len(comp)
-            else:                                                # copy blob verbatim
-                blob = self.data[e.off:e.off + e.stored]
+            else:                                                # скопіюємо як є
+                blob = None
                 raw_size, stored, crc, mtime = e.raw_size, e.stored, e.crc, e.mtime
-            blobs.append(blob)
+            plan.append((e, blob))
             field, nlen = e.name_field, e.nlen
             if field is None:
                 name = e.name.encode('cp932')
@@ -134,14 +137,18 @@ class Bra:
                 field = name.ljust(nlen, b'\0')
             index.append(ENT.pack(mtime, crc, stored, raw_size, nlen, 0x20, off) + field)
             off += stored
-            if progress:
-                progress(i, len(self.entries), e.name)
+        # 2) пишемо потоком: незмінені блоки — шматками прямо з оригіналу
         with open(out_path, 'wb') as f:
             f.write(struct.pack('<4sIII', HDR, self.version, off + len(self.index_pad),
                                 len(self.entries)))
-            for b in blobs:
-                f.write(b)
+            for i, (e, blob) in enumerate(plan):
+                if blob is not None:
+                    f.write(blob)
+                else:
+                    for p in range(e.off, e.off + e.stored, 1 << 22):
+                        f.write(self.data[p:min(p + (1 << 22), e.off + e.stored)])
+                if progress:
+                    progress(i, len(self.entries), e.name)
             f.write(self.index_pad)
-            for b in index:
-                f.write(b)
+            f.write(b''.join(index))
         return out_path

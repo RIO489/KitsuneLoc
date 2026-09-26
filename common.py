@@ -74,9 +74,11 @@ def save_rich(root, game, source, fmt, entries, meta=None):
     """entries: [dict(id=..., src=..., інші поля)]. Наявні `tr` за тим самим id зберігаються."""
     dst = path_for(root, source)
     keep = ('tr', 'note', 'auto')          # те, що вносить людина, — переживає повторний експорт
-    old = {}
+    old, old_text = {}, None
     if os.path.exists(dst):
-        for e in json.load(open(dst, encoding='utf-8'))['entries']:
+        with open(dst, encoding='utf-8') as f:
+            old_text = f.read()
+        for e in json.loads(old_text)['entries']:
             kept = {k: e[k] for k in keep if e.get(k)}
             if kept:
                 old[e['id']] = kept
@@ -89,8 +91,12 @@ def save_rich(root, game, source, fmt, entries, meta=None):
         ne.update(old.get(e['id'], {}))
         ne.setdefault('tr', '')
         doc['entries'].append(ne)
-    with open(dst, 'w', encoding='utf-8') as f:
-        json.dump(doc, f, ensure_ascii=False, indent=1)
+    text = json.dumps(doc, ensure_ascii=False, indent=1)
+    if text != old_text:
+        # незмінений файл не переписуємо: менше запису на диск, і антивірус не
+        # перевіряє його заново при наступному відкритті (5 мс на файл)
+        with open(dst, 'w', encoding='utf-8') as f:
+            f.write(text)
     return dst
 
 

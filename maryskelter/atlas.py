@@ -58,13 +58,18 @@ def load_json(name):
 
 # ------------------------------------------------------------------ шрифти
 _fonts = {}
+EXTRA_FONT_DIRS = {}    # шрифт -> тека (бібліотека кандидатів, див. fontlib.py)
 
 
 def _font(st, px):
     key = (st['шрифт'], json.dumps(st.get('варіація'), sort_keys=True), px)
     f = _fonts.get(key)
     if f is None:
-        f = ImageFont.truetype(os.path.join(FONTS, st['шрифт']), px)
+        path = os.path.join(FONTS, st['шрифт'])
+        if not os.path.exists(path):
+            path = os.path.join(EXTRA_FONT_DIRS.get(st['шрифт'], os.path.join(FONTS, 'кандидати')),
+                                st['шрифт'])
+        f = ImageFont.truetype(path, px)
         var = st.get('варіація')
         if isinstance(var, str):
             f.set_variation_by_name(var)
@@ -229,13 +234,43 @@ def _ink(im, thr=24):
     return im.getchannel('A').point(lambda v: 255 if v > thr else 0).getbbox()
 
 
+_EFFECTS = ('обведення', 'обведення2', 'тінь', 'сяйво')
+
+
+def _geom(st):
+    """Стиль лише з формою літер — для вимірів. Межі самих літер (cb) і базова
+    лінія від ефектів не залежать, а малювати сяйво й тінь у 4-кратному
+    розмірі — найдорожче. З поворотом ефекти впливають на розміщення — там
+    лишаємо стиль як є."""
+    if st.get('поворот'):
+        return st
+    g = {k: v for k, v in st.items() if k not in _EFFECTS}
+    g['заливка'] = '#ffffff'
+    return g
+
+
+_measured = {}
+
+
+def measure(text, st, px, align='центр'):
+    """(by, cb) з render() — з пам'яттю: той самий напис міряється багато разів."""
+    key = (text, json.dumps(st, sort_keys=True, ensure_ascii=False), px, align)
+    got = _measured.get(key)
+    if got is None:
+        if len(_measured) > 20000:
+            _measured.clear()
+        _im, _bx, by, cb = render(text, _geom(st), px, align)
+        got = _measured[key] = (by, cb)
+    return got
+
+
 def fit_size(text, st, height):
     """Кегль, за якого літери `text` цим стилем мають висоту `height`."""
     probe = 100
-    _, _, _, cb = render(text, st, probe)
+    _, cb = measure(text, st, probe)
     px = max(4, int(probe * height / max(1, cb[3] - cb[1])))
     for _ in range(4):                               # доточуємо на ±1-2
-        _, _, _, cb = render(text, st, px)
+        _, cb = measure(text, st, px)
         hh = cb[3] - cb[1]
         if hh > height + 0.5 and px > 4:
             px -= 1
@@ -376,10 +411,27 @@ def draw(img, box, spec, styles, text, info=None):
     fx0, fx1 = spec.get('поле', [ax0, ax1])
     fw = fx1 - fx0
     size = spec.get('кегль') or fit_size(spec['текст'], st, ly1 - ly0)
-    _, _, rby, rcb = render(spec['текст'], st, size, how)
+    rby, rcb = measure(spec['текст'], st, size, how)
     base_y = ly0 + (rby - rcb[1])                   # базова лінія в кадрі
     n_orig = spec['текст'].count('\n') + 1
     text = text.replace('\r', '')
+
+    if spec.get('літери з оригіналу'):
+        # А В Е К М Н О Р С Т Х І… — вирізати з оригіналу (див. origletters.py)
+        from . import origletters
+        orig = img.crop(box)
+        erase(img, box, spec)
+        res = origletters.compose(orig, img.crop(box), spec, st, text, size, base_y, (fx0, fx1))
+        if res is not None:
+            layer, real, sx = res
+            if info is not None:
+                info['масштаб'] = sx
+                info['справжніх'] = real
+            frame = img.crop(box)
+            frame.alpha_composite(layer)
+            img.paste(frame, box[:2])
+            return []
+        img.paste(orig, box[:2])                    # не вийшло — звичайний шлях
 
     def fit(t):
         px = size
@@ -494,6 +546,56 @@ def rebuild(blob, mark, tr, styles):
         rects.append(box)
     cl3.replace(tid_f[0], dds.patch(data, img, rects))
     return cl3.build(), len(rects), warns
+
+
+# ------------------------------------------------------------ кеш атласів
+CACHE_DIR = os.path.join(HERE, 'кеш', 'атласи')
+
+
+def _env_sig():
+    """Усе спільне, від чого залежить малювання: код, шрифти, заготовки тла."""
+    parts = []
+    for d, ext in ((os.path.join(HERE, 'maryskelter'), '.py'), (os.path.join(HERE, 'neptunia'), '.py'),
+                   (FONTS, ''), (os.path.join(DIR, 'тло'), '')):
+        try:
+            for fn in sorted(os.listdir(d)):
+                p = os.path.join(d, fn)
+                if fn.endswith(ext) and os.path.isfile(p):
+                    st = os.stat(p)
+                    parts.append(f'{fn}:{st.st_size}:{st.st_mtime_ns}')
+        except OSError:
+            pass
+    return '|'.join(parts)
+
+
+def cached(src, blob, mark, tr, styles, fn):
+    """fn(blob, mark, tr, styles) з кешем у кеш/атласи/: атлас, у якому не
+    змінилось нічого (оригінал, розмітка, переклад його написів, стилі, шрифти,
+    код), не перемальовуємо — малювання дає ті самі байти, а коштує секунди."""
+    import hashlib, pickle
+    keys = sorted({key_of(s) for s in mark['кадри'].values()})
+    h = hashlib.md5(_env_sig().encode('utf-8'))
+    h.update(hashlib.md5(blob).digest())
+    h.update(json.dumps([mark, {k: tr[k] for k in keys if k in tr}, styles],
+                        sort_keys=True, ensure_ascii=False).encode('utf-8'))
+    key = h.hexdigest()
+    path = os.path.join(CACHE_DIR, hashlib.md5(src.encode('utf-8')).hexdigest() + '.pickle')
+    try:
+        with open(path, 'rb') as f:
+            k, res = pickle.load(f)
+        if k == key:
+            return res
+    except Exception:
+        pass
+    res = fn(blob, mark, tr, styles)
+    try:
+        os.makedirs(CACHE_DIR, exist_ok=True)
+        with open(path + '.tmp', 'wb') as f:
+            pickle.dump((key, res), f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(path + '.tmp', path)
+    except OSError:
+        pass                    # кеш — лише прискорення
+    return res
 
 
 # ------------------------------------------------------------- для розмітки
