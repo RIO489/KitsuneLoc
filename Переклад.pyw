@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.6'
+VERSION = '1.7'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -199,6 +199,11 @@ def human(n):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        try:
+            import tkkeys                # Ctrl+V/C/X/A за української розкладки + меню правої кнопки
+            tkkeys.install(self)
+        except Exception:
+            pass
         self.settings = load_settings()
         self.theme = self.settings.get('theme', 'light')
         self.game = tk.StringVar(value=self.settings.get('last_game', 'crystar'))
@@ -259,13 +264,21 @@ class App(tk.Tk):
         wf.pack(fill='x', **pad)
         steps = ttk.Frame(wf); steps.pack(fill='x', padx=10, pady=(8, 10))
         self.b1 = self._step_button(steps, '1. Дістати текст з гри', 'зібрати книги Excel',
-                                    lambda: self._run(self.do_export, 'neptune.wav'), accent=True)
+                                    lambda: (self._flush_editor(), self._run(self.do_export, 'neptune.wav')), accent=True)
         self.b_open = self._step_button(steps, 'Відкрити теку з перекладом',
                                         'там лежать книги .xlsx', self.open_xlsx)
         self.b2 = self._step_button(steps, '2. Залити переклад у гру', 'з резервною копією',
-                                    lambda: self._run(self.do_import, 'neptune-shy.wav'), accent=True)
+                                    lambda: (self._flush_editor(), self._run(self.do_import, 'neptune-shy.wav')), accent=True)
         self.b3 = self._step_button(steps, '3. Запустити гру',
                                     'подивитись результат', self.launch)
+
+        ed = ttk.Frame(wf); ed.pack(fill='x', padx=10, pady=(0, 8))
+        self.b_editor = ttk.Button(ed, text='Редактор перекладу…', command=self.open_editor,
+                                   style='Accent.TButton')
+        self.b_editor.pack(side='left')
+        self.editor_hint = ttk.Label(ed, text='', style='Hint.TLabel')
+        self.editor_hint.pack(side='left', padx=10)
+        self.editor_win = None
 
         bk = ttk.Frame(wf); bk.pack(fill='x', padx=10, pady=(0, 10))
         ttk.Label(bk, text='Книга:').pack(side='left')
@@ -287,10 +300,10 @@ class App(tk.Tk):
         ef.pack(fill='x', **pad)
         row = ttk.Frame(ef); row.pack(fill='x', padx=10, pady=10)
         self.b_prog = ttk.Button(row, text='Мій прогрес',
-                                 command=lambda: self._run(self.do_progress))
+                                 command=lambda: (self._flush_editor(), self._run(self.do_progress)))
         self.b_prog.pack(side='left')
         self.b_check = ttk.Button(row, text='Перевірити переклад',
-                                  command=lambda: self._run(self.do_check))
+                                  command=lambda: (self._flush_editor(), self._run(self.do_check)))
         self.b_check.pack(side='left', padx=8)
         self.b_rest = ttk.Button(row, text='Повернути оригінали гри',
                                  command=lambda: self._run(self.do_restore))
@@ -303,7 +316,7 @@ class App(tk.Tk):
         ttk.Checkbutton(row, text='Звуки', variable=self.sound,
                         command=self._save_sound).pack(side='right', padx=(0, 4))
 
-        self.buttons = [self.b1, self.b2, self.b3, self.b_open, self.b_book, self.b_pics,
+        self.buttons = [self.b1, self.b2, self.b3, self.b_open, self.b_book, self.b_pics, self.b_editor,
                         self.b_prog, self.b_check, self.b_rest,
                         self.b_find, self.b_pick]
 
@@ -444,6 +457,17 @@ class App(tk.Tk):
         self._refresh_books()
         self._refresh_badge()
         self._refresh_title()
+        self._refresh_editor_hint()
+
+    def _refresh_editor_hint(self):
+        import project
+        xl = os.path.join(XLSX, GAMES[self.game.get()]['folder'])
+        if project.enabled(xl):
+            self.editor_hint.configure(text='переклад живе в програмі; книги Excel — лише копія '
+                                            '(«Вивантажити в Excel» у редакторі)')
+        else:
+            self.editor_hint.configure(text='зараз переклад у книгах Excel; редактор перенесе його '
+                                            'в програму')
 
     def _refresh_books(self):
         xl = os.path.join(XLSX, GAMES[self.game.get()]['folder'])
@@ -452,6 +476,11 @@ class App(tk.Tk):
             names = sorted(f for f in os.listdir(xl)
                            if f.endswith('.xlsx') and not f.startswith('~$'))
         self._show_books(xl, names)
+        import project
+        if project.enabled(xl):
+            # переклад у редакторі, книги — лише копія: не читати їх заради відсотків
+            # (MSK — 25 книг, кілька секунд процесора; саме тоді, коли відкривається редактор)
+            return
         # відсотки рахуються у фоні: відкрити всі книги — кілька секунд
         game = self.game.get()
 
@@ -632,6 +661,8 @@ class App(tk.Tk):
                     self.status.set(f'{label}  ({i}/{n})' if label else f'{i}/{n}')
                 elif kind == 'status':
                     self.status.set(val)
+                elif kind == 'call':                     # дія в головному потоці (з фонового)
+                    val()
                 elif kind == 'done':
                     self.busy = False
                     self.elapsed.set('')
@@ -730,6 +761,10 @@ class App(tk.Tk):
 
     def _shutdown(self):
         try:
+            self._flush_editor()
+        except Exception:
+            pass
+        try:
             self.settings['geometry'] = self.geometry()
             self.settings['last_game'] = self.game.get()
             save_settings(self.settings)
@@ -744,7 +779,7 @@ class App(tk.Tk):
 
     DEPS = (('openpyxl', 'openpyxl'), ('UnityPy', 'UnityPy'), ('PIL', 'Pillow'),
             ('texture2ddecoder', 'texture2ddecoder'), ('etcpak', 'etcpak'),
-            ('sv_ttk', 'sv-ttk'))
+            ('sv_ttk', 'sv-ttk'), ('fontTools', 'fonttools'))
 
     def _check_deps(self):
         import importlib.util
@@ -862,7 +897,11 @@ class App(tk.Tk):
             raise RuntimeError('Спершу закрий в Excel: ' + ', '.join(busy) +
                                '\n(збережи зміни — вони нікуди не дінуться, програма їх підхопить)')
         self._require_originals()
-        if os.path.isdir(xl):
+        import project
+        in_editor = project.enabled(xl)
+        if in_editor:
+            pass                        # переклад — у переклад.json, книги не читаємо
+        elif os.path.isdir(xl):
             self.say('Читаю те, що вже перекладено…')
             st = sheets.read_into_work(xl, work, self.step)
             self.say(f'  підхоплено перекладів: {st["translated"]}', 'dim')
@@ -880,6 +919,20 @@ class App(tk.Tk):
             import translate_crystar as t
             ns.root = self.data_dir()
         self._capture(lambda: t.cmd_export(ns, self.step))
+        if in_editor:
+            # нові рядки з гри — у проєкт; переклад із переклад.json — у work
+            pr = project.Project(g, work, xl)
+            pr.sync_work()
+            self._project = pr
+            win = getattr(self, 'editor_win', None)
+            if win is not None:
+                self.q.put(('call', lambda: win.winfo_exists() and win.reload(pr)))
+            p = pr.progress()
+            self._remember_pc(p['done'], p['total'])
+            self.set_status(f'Готово. Перекладено {p["done"]} з {p["total"]} рядків.')
+            self.say('\nТекст з гри оновлено. Перекладай у «Редактор перекладу…».', 'ok')
+            self._chibi(g)
+            return
         if os.path.isdir(xl):
             # щойно з'явились нові розділи (напр. «Написи на картинках») — підхопити
             # переклад, який уже лежить у їхній книзі, доки її не перезібрано
@@ -900,6 +953,9 @@ class App(tk.Tk):
         self._remember_pc(done, total)
         self.set_status(f'Готово. Перекладено {done} з {total} рядків.')
         self.say(f'\nФайли для перекладу тут:\n{xl}', 'ok')
+        self._chibi(g)
+
+    def _chibi(self, g):
         try:
             import chibi
             if chibi.ensure(g, self.dirs()[3], self.root_dir(), self.step_nc):
@@ -921,15 +977,11 @@ class App(tk.Tk):
         self._require_closed()
         self._check_space()
         self._require_originals()
-        self.say('Читаю переклад з Excel…')
-        st = sheets.read_into_work(xl, work, self.step)
-        self.say(f'  книг: {st["books"]}, рядків: {st["rows"]}, '
-                 f'перекладено: {st["translated"]}', 'dim')
-        if not st['translated']:
-            raise RuntimeError('У книгах немає жодного перекладу — нема чого заливати.')
+        if not self._read_translation():
+            raise RuntimeError('Перекладу ще немає — нема чого заливати.')
         warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl)), xl)
         if warn:
-            self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок у книзі, '
+            self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок, '
                      'правий клік — затвердити)', 'warn')
         self._say_warnings(warn, 10, hidden)
         self.say('\nЗбираю файли гри…')
@@ -955,6 +1007,32 @@ class App(tk.Tk):
         self.set_status(f'Готово. У грі замінено файлів: {n}.')
         self.say(f'\nЗамінено файлів: {n}. Оригінали збережено в {bk}.\n'
                  'Тепер тисни «3. Запустити гру».', 'ok')
+
+    def _read_translation(self):
+        """Переклад -> work\\: з редактора (переклад.json) або, як раніше, з книг Excel.
+        Повертає кількість перекладених рядків."""
+        import sheets, project
+        g = self.cur['game']
+        work, xl, _o, _b = self.dirs()
+        if project.enabled(xl):
+            self.say('Беру переклад з редактора…')
+            pr = getattr(self, '_project', None)
+            if pr is None or pr.game != g:
+                pr = self._project = project.Project(g, work, xl)
+            pr.save()                   # переклад.json + work (правки з вікна вже скинуто _flush_editor)
+            done = sum(1 for r in pr.rows if r['e'].get('tr'))
+            self.say(f'  перекладено рядків: {done}', 'dim')
+            newer = pr.excel_newer()
+            if newer:
+                self.say('  Увага: книги Excel змінено після вивантаження (' + ', '.join(newer[:5]) +
+                         ('…' if len(newer) > 5 else '') + '). Переклад береться з редактора; '
+                         'щоб узяти зміни з книг — «Завантажити з Excel…» у редакторі.', 'warn')
+            return done
+        self.say('Читаю переклад з Excel…')
+        st = sheets.read_into_work(xl, work, self.step)
+        self.say(f'  книг: {st["books"]}, рядків: {st["rows"]}, '
+                 f'перекладено: {st["translated"]}', 'dim')
+        return st['translated']
 
     def _require_closed(self):
         """Гра відкрита — Windows може дозволити підмінити архів, але гра й далі
@@ -1063,7 +1141,12 @@ class App(tk.Tk):
                      'збереженню — ' + ', '.join(busy), 'warn')
         self.set_status('Рахую…')
         self.say(f'\n=== {GAMES[g]["title"]} ===', 'head')
-        pr = sheets.progress(xl, work)
+        import project
+        if project.enabled(xl):
+            pr = project.Project(g, work, xl).progress()
+            pr['prev'] = sheets._snapshot(work, pr['done'], pr['total'])
+        else:
+            pr = sheets.progress(xl, work)
         for line in sheets.report(pr):
             self.say(line, 'mono')
         self._remember_pc(pr['done'], pr['total'])
@@ -1071,9 +1154,11 @@ class App(tk.Tk):
         self.set_status(f'Перекладено {pr["done"]}/{pr["total"]} ({pc:.1f}%).')
 
     def do_check(self):
-        import sheets, common
+        import sheets, common, project
         work, xl, _o, _b = self.dirs()
-        if os.path.isdir(xl):
+        if project.enabled(xl):
+            self._read_translation()
+        elif os.path.isdir(xl):
             sheets.read_into_work(xl, work, self.step)
         done, total = common.stats(work)
         self._remember_pc(done, total)
@@ -1083,7 +1168,7 @@ class App(tk.Tk):
         if not warn:
             self.say('Попереджень немає — усе чисто.', 'ok')
         else:
-            self.say(f'Попереджень: {len(warn)} (клік — відкрити рядок у книзі, '
+            self.say(f'Попереджень: {len(warn)} (клік — відкрити рядок, '
                      'правий клік — затвердити: це не помилка)', 'warn')
         self._say_warnings(warn, 200, hidden)
         self.set_status(f'Перекладено {done}/{total}.')
@@ -1112,7 +1197,7 @@ class App(tk.Tk):
         """Правий клік по попередженню: відкрити рядок / затвердити / скасувати."""
         game, s, i, src, msg, tr, approved = self.links[name]
         m = tk.Menu(self, tearoff=0)
-        m.add_command(label='Відкрити рядок у книзі', command=lambda: self._goto((game, s, i, src)))
+        m.add_command(label='Відкрити рядок', command=lambda: self._goto((game, s, i, src)))
         if approved:
             m.add_command(label='Скасувати затвердження',
                           command=lambda: self._approve(name, False))
@@ -1152,6 +1237,13 @@ class App(tk.Tk):
             self.set_status('Зачекай, поки закінчиться поточна дія.')
             return
         xl = os.path.join(XLSX, GAMES[game]['folder'])
+        import project
+        if project.enabled(xl):
+            if game != self.game.get():
+                self.set_status('Це попередження іншої гри — перемкни гру вгорі.')
+                return
+            self.open_editor(goto=f'{source}\t{eid}')
+            return
         self.set_status('Шукаю рядок у книгах…')
 
         def job():
@@ -1260,6 +1352,87 @@ class App(tk.Tk):
             terms_window.TermsWindow(self)
         except Exception as e:
             messagebox.showerror('Терміни', str(e))
+
+    # ------------------------------------------------------ редактор перекладу
+    def get_project(self):
+        """Спільний проєкт (project.py) поточної гри: один на всі вікна, щоб
+        редактор і вікно написів не затирали правки одне одного."""
+        import project
+        g = self.cur['game']
+        work, xl, _o, _b = self.dirs()
+        pr = getattr(self, '_project', None)
+        if pr is None or pr.game != g:
+            pr = self._project = project.Project(g, work, xl)
+        return pr
+
+    def _flush_editor(self):
+        """Правки з відкритого редактора — на диск (перед «1», «2», перевіркою)."""
+        win = getattr(self, 'editor_win', None)
+        if win is not None and win.winfo_exists():
+            win.flush()
+        pr = getattr(self, '_project', None)
+        if pr is not None and pr.pending():
+            pr.save()
+
+    def open_editor(self, goto=None):
+        """Редактор перекладу: увесь текст гри в програмі (editor.py)."""
+        self._snap()
+        import importlib, project
+        work, xl, _o, bk = self.dirs()
+        win = getattr(self, 'editor_win', None)
+        if win is not None and win.winfo_exists():
+            if goto:
+                win.goto(goto)
+            win.lift()
+            return
+        if not os.path.isdir(work) or not any(True for _ in __import__('common').walk(work)):
+            messagebox.showinfo('Редактор перекладу', 'Спочатку натисни «1. Дістати текст з гри».')
+            return
+        if not project.enabled(xl):
+            busy = self.open_books(xl)
+            if busy:
+                messagebox.showwarning('Редактор перекладу',
+                                       'Спершу закрий в Excel: ' + ', '.join(busy) +
+                                       '\n(збережи зміни — програма їх перенесе).')
+                return
+            if not messagebox.askyesno(
+                    'Перейти на редактор',
+                    'Переклад переїде з книг Excel у програму:\n\n'
+                    '• усе, що вже є в книгах, перенесеться;\n'
+                    '• однакові рядки стануть пов\'язаними (переклав один — перекладено всі); '
+                    'де однакові рядки вже перекладено по-різному — вони лишаться окремими;\n'
+                    '• далі програма бере переклад із редактора, а не з книг. Книги можна '
+                    'вивантажити будь-коли як копію, а зміни з них — завантажити назад.\n\n'
+                    'Перейти?'):
+                return
+            if self.busy:
+                return
+            self._run(lambda: self._migrate(), None)
+            return
+        try:
+            for name in ('project', 'preview', 'editor'):
+                if name in sys.modules:
+                    importlib.reload(sys.modules[name])
+            import editor
+            editor.Editor(self, self.get_project(), bk, goto=goto)
+        except Exception as e:
+            messagebox.showerror('Редактор перекладу', f'{e}\n\n{traceback.format_exc()}')
+
+    def _migrate(self):
+        """Перший перехід на редактор (у фоні): книги -> work -> переклад.json."""
+        import sheets, project
+        work, xl, _o, _b = self.dirs()
+        self.say('Переношу переклад із книг Excel у програму…')
+        if os.path.isdir(xl):
+            st = sheets.read_into_work(xl, work, self.step)
+            self.say(f'  з книг прочитано перекладів: {st["translated"]}', 'dim')
+        pr, (filled, detached) = project.Project.create(self.cur['game'], work, xl)
+        self._project = pr
+        done = sum(1 for r in pr.rows if r['e'].get('tr'))
+        self.say(f'  готово: перекладено {done} рядків; однакових заповнено {filled}, '
+                 f'залишено окремими (різний переклад) {detached}.', 'ok')
+        self.say(f'  переклад тепер у файлі {project.store_path(xl)}', 'dim')
+        self.q.put(('call', lambda: (self._refresh_editor_hint(), self.open_editor())))
 
     def open_pics(self):
         """Вікно перекладу написів на картинках з живим прев'ю."""

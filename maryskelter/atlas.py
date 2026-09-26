@@ -42,6 +42,7 @@
 зменшуємо кегль, і лише коли й це не рятує (менше 70%) — попереджаємо.
 """
 import json, math, os
+import numpy as np
 from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -63,15 +64,19 @@ _fonts = {}
 EXTRA_FONT_DIRS = {}    # шрифт -> тека (бібліотека кандидатів, див. fontlib.py)
 
 
+def _font_path(st):
+    path = os.path.join(FONTS, st['шрифт'])
+    if not os.path.exists(path):
+        path = os.path.join(EXTRA_FONT_DIRS.get(st['шрифт'], os.path.join(FONTS, 'кандидати')),
+                            st['шрифт'])
+    return path
+
+
 def _font(st, px):
     key = (st['шрифт'], json.dumps(st.get('варіація'), sort_keys=True), px)
     f = _fonts.get(key)
     if f is None:
-        path = os.path.join(FONTS, st['шрифт'])
-        if not os.path.exists(path):
-            path = os.path.join(EXTRA_FONT_DIRS.get(st['шрифт'], os.path.join(FONTS, 'кандидати')),
-                                st['шрифт'])
-        f = ImageFont.truetype(path, px)
+        f = ImageFont.truetype(_font_path(st), px)
         var = st.get('варіація')
         if isinstance(var, str):
             f.set_variation_by_name(var)
@@ -161,6 +166,8 @@ def render(text, st, px, align='центр'):
     w, h = W + 2 * pad + extra, y1 - y0 + 2 * pad + 2 * lift
     bx, by = pad + (extra if shear < 0 else 0), pad - y0 + lift    # базова лінія першого рядка
 
+    sq = st.get('квадратність', 0)
+
     def mask(sw):
         m = Image.new('L', (w, h))
         d = ImageDraw.Draw(m)
@@ -168,9 +175,31 @@ def render(text, st, px, align='центр'):
             _line_draw(d, (bx + offs[k], by + k * adv), t, f, sw, track)
         return m
 
-    core = mask(0)
-    outer = mask(stroke) if stroke else core
-    outer2 = mask(stroke2) if stroke2 > stroke else None
+    def square():
+        """Літери з контурів, підтягнутих до кутів (squarefont.py)."""
+        from . import squarefont
+        m = Image.new('L', (w, h))
+        d = ImageDraw.Draw(m)
+        path, var = _font_path(st), st.get('варіація')
+        for k, t in enumerate(lines):
+            y = by + k * adv
+            for i, ch in enumerate(t):
+                x = bx + offs[k] + (f.getlength(t[:i]) if not track else
+                                    sum(f.getlength(c) + track for c in t[:i]))
+                if not ch.isspace() and not squarefont.draw(m, x, y, path, var, ch, px * SS, sq):
+                    d.text((x, y), ch, font=f, fill=255, anchor='ls')
+        return m
+
+    if sq > 0:
+        # обведення — розширена маска літер (кути лишаються гострішими, ніж у stroke_width)
+        core = square()
+        outer = Image.fromarray(_morph(np.asarray(core), stroke, True, 'коло')) if stroke else core
+        outer2 = (Image.fromarray(_morph(np.asarray(core), stroke2, True, 'коло'))
+                  if stroke2 > stroke else None)
+    else:
+        core = mask(0)
+        outer = mask(stroke) if stroke else core
+        outer2 = mask(stroke2) if stroke2 > stroke else None
     if outer2 is not None:
         stroke_all = outer2          # тінь і сяйво — від найширшого контуру
     else:
@@ -229,6 +258,28 @@ def render(text, st, px, align='центр'):
         bx *= k
     out = out.resize((max(1, round(w / SS)), max(1, round(h / SS))), Image.LANCZOS)
     return out, bx / SS, by / SS, [v / SS for v in cb]
+
+
+def _morph(a, r, grow, shape):
+    """Мінімум (grow=False) чи максимум маски в околі радіуса r:
+    shape 'квадрат' або 'коло' (восьмикутник: по черзі хрест і квадрат 3×3)."""
+    fn = np.maximum if grow else np.minimum
+    r = int(round(r))
+    if r <= 0:
+        return a
+
+    def shift(x, dy, dx):
+        p = np.pad(x, 1, mode='constant', constant_values=0 if grow else 255)
+        return p[1 + dy:1 + dy + x.shape[0], 1 + dx:1 + dx + x.shape[1]]
+
+    for k in range(r):
+        out = fn(fn(a, shift(a, 1, 0)), shift(a, -1, 0))
+        out = fn(fn(out, shift(a, 0, 1)), shift(a, 0, -1))
+        if shape == 'квадрат' or k % 2:
+            for dy, dx in ((1, 1), (1, -1), (-1, 1), (-1, -1)):
+                out = fn(out, shift(a, dy, dx))
+        a = out
+    return a
 
 
 def _ink(im, thr=24):
@@ -500,7 +551,6 @@ def _hatch(img, box, spec):
     знаходимо нахил і крок смужок (колір залежить лише від (x + k·y) mod P) і
     заливаємо такими самими смужками многокутник "полігон" [[x, y], ...] —
     місце старого тексту всередині картки, без рамки й іконок. Координати — кадру."""
-    import numpy as np
     fx, fy = box[0], box[1]
     frame = np.asarray(img.crop(box).convert('RGBA')).astype(float)
 

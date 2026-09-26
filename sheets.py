@@ -693,25 +693,30 @@ def _backup_of(work_dir):
     return os.path.join(os.path.dirname(os.path.dirname(w)), 'backup', os.path.basename(w))
 
 
-def validate(work_dir, backup_dir=None, terms=None):
-    """[(source, id, попередження)]; terms — глосарій (glossary.load), щоб ловити
-    рядки, де термін в оригіналі є, а його перекладу немає."""
-    import glossary
-    warn = []
-    validate.src = {}                       # (source, id) -> оригінал: для переходу до рядка
-    validate.tr = {}                        # (source, id) -> переклад: для «Затверджено»
-    files = collect(work_dir)
-    tagdict = tags.build_dict(files) if any(s.startswith('parameter/') for s, _ in files) else None
-    docs = [d for d in (locfile.load_json(p) for p in sorted(locfile.walk(work_dir))) if d]
-    docs = [d for d in docs if d.get('format') != 'atlas']   # написи малюємо самі: ліміти тут не діють
-
-    # ширина в пікселях за шрифтом гри (якщо його вдалося прочитати)
+def limits(docs, backup_dir, cache_dir):
+    """Межі з оригіналів для перевірки ширини: {'wtab', 'game', 'gmax', 'gcount', 'glines'}.
+    По групах (див. _width_group): найширший рядок і найбільше рядків в оригіналах."""
     import metrics
+    docs = [d for d in docs if d.get('format') != 'atlas']   # написи малюємо самі: ліміти тут не діють
     game = next((d.get('game') for d in docs), None)
-    wtab = metrics.table(game, backup_dir or _backup_of(work_dir),
-                         os.path.dirname(os.path.abspath(work_dir))) if game else None
-    # по групах (див. _width_group): найширший рядок і найбільше рядків в оригіналах
+    wtab = metrics.table(game, backup_dir, cache_dir) if game else None
     gmax, gcount, glines = {}, {}, {}
+    # екрани, де видно репліку: головне вікно й історія діалогів (Neptunia — різні шрифти:
+    # advfont і msgfont; MSK — той самий msgfont, але різна ширина). 'id' — ключ DIALOG_WIDTH
+    screens = []
+    if wtab:
+        if game == 'nep':
+            adv = metrics.table(game, backup_dir, cache_dir, 'adv')
+            if adv:
+                screens.append({'назва': 'головне вікно діалогу', 'id': 'adv', 'font': 'adv',
+                                'wtab': adv, 'w': []})
+            screens.append({'назва': 'вікно історії діалогів', 'id': 'msg', 'font': 'msg',
+                            'wtab': wtab, 'w': []})
+        else:
+            screens.append({'назва': 'вікно діалогу', 'id': 'msg', 'font': 'msg', 'wtab': wtab, 'w': []})
+            if (game, 'log') in DIALOG_WIDTH:
+                screens.append({'назва': 'вікно історії діалогів', 'id': 'log', 'font': 'msg',
+                                'wtab': wtab, 'w': []})
     for doc in docs:
         for e in doc['entries']:
             g = _width_group(doc, e)
@@ -722,97 +727,155 @@ def validate(work_dir, backup_dir=None, terms=None):
             if wtab:
                 w = max(metrics.width(x, wtab, game) for x in e['src'].split('\n'))
                 gmax[g] = max(gmax.get(g, 0), w)
-    for doc in docs:
-        enc = doc.get('encoding')
-        is_cry = doc.get('game') == 'crystar'
-        for e in doc['entries']:
-            tr = e.get('tr')
-            if not tr:
-                continue
-            src = e['src']
-            validate.src[(doc['source'], e['id'])] = src
-            validate.tr[(doc['source'], e['id'])] = tr
-            for en, ua in glossary.missing(src, tr, terms or []):
-                warn.append((doc['source'], e['id'], f'термін «{en}» → «{ua}»: у перекладі не знайдено'))
-            g = _width_group(doc, e)
-            n_src, n_tr = _nlines(src), _nlines(tr)
-            if g is not None and (g == ('діалог',) or gcount.get(g, 0) >= 5):
-                # переносити можна по-своєму — аби рядків не стало більше, ніж уміщає місце
-                if n_tr > glines[g]:
-                    where = 'вікно діалогу вміщає' if g == ('діалог',) else 'в оригіналах цього поля'
-                    warn.append((doc['source'], e['id'],
-                                 f'рядків {n_tr} — {where} не більше {glines[g]}'))
-            elif n_src != n_tr:
-                warn.append((doc['source'], e['id'],
-                             f"переносів рядка: було {n_src}, стало {n_tr}"))
-            if wtab:
-                g = _width_group(doc, e)
-                wsrc = [metrics.width(x, wtab, game) for x in src.split('\n')]
-                wtr = [metrics.width(x, wtab, game) for x in tr.split('\n')]
                 if g == ('діалог',):
-                    lim = gmax[g]
-                elif g is not None and gcount.get(g, 0) >= 5:
-                    lim = max(gmax[g], max(wsrc) * 1.1)
-                else:
-                    lim = max(max(wsrc) * 1.35, max(wsrc) + 6 * (wtab.get('n') or 12))
-                if max(wtr) > lim:
-                    where = 'вікно діалогу' if g == ('діалог',) else 'місце на екрані'
-                    warn.append((doc['source'], e['id'],
-                                 f'рядок ширший за {where}: {max(wtr)} px при межі {round(lim)} px '
-                                 f'(оригінал {max(wsrc)} px) — перенеси рядок або скороти'))
-            else:
-                for a, b in zip(src.split('\n'), tr.split('\n')):
-                    if len(b) > max(len(a) + 6, len(a) * 1.35):
-                        warn.append((doc['source'], e['id'],
-                                     f'рядок довший за оригінал: {len(a)} -> {len(b)} символів'))
-                        break
-            if doc.get('game') == 'msk':
-                bad = mchars.missing(tr)
-                if bad:
-                    warn.append((doc['source'], e['id'],
-                                 f"гра не покаже: {' '.join(bad)} (потрібен гліф у шрифті)"))
-                res = sorted(set(tr) & getattr(mchars, 'RESERVED', set()))
-                if res:
-                    warn.append((doc['source'], e['id'],
-                                 f"у грі замість {' '.join(res)} з'являться українські "
-                                 f"літери — прибери ці символи"))
-            if doc.get('game') == 'nep':
-                from neptunia import chars as nchars
-                bad = nchars.bad_chars(tr)
-                if bad:
-                    warn.append((doc['source'], e['id'],
-                                 f"гра не покаже: {' '.join(bad)} (буде «?»)"))
-                for c, n in (nep_codes(src) - nep_codes(tr)).items():
-                    warn.append((doc['source'], e['id'], f'бракує коду {c}' + (f' ×{n}' if n > 1 else '')))
-                for c in nep_codes(tr) - nep_codes(src):
-                    warn.append((doc['source'], e['id'], f'зайвий код {c}'))
-            if e.get('cap') and doc.get('game') == 'nep':
-                from neptunia import chars as nchars
-                need = len(nchars.encode(tr, 'replace')) + 1
-                if need > e['cap']:
-                    warn.append((doc['source'], e['id'],
-                                 f"задовго: {need - 1} при ліміті {e['cap'] - 1} символів — "
-                                 f"лишиться англійським"))
-            elif e.get('cap'):
-                need = len(tr.encode(enc or 'utf-8', 'replace')) + 1
-                if need > e['cap']:
-                    warn.append((doc['source'], e['id'],
-                                 f"задовго: {need} Б при ліміті {e['cap']} Б"))
-            if doc.get('game') == 'msk':
-                miss = msk_codes(src) - msk_codes(tr)
-                for c, n in miss.items():
-                    warn.append((doc['source'], e['id'], f'бракує коду {c}' + (f' ×{n}' if n > 1 else '')))
-                extra = msk_codes(tr) - msk_codes(src)
-                for c in extra:
-                    warn.append((doc['source'], e['id'], f'зайвий код {c} — гра може впасти'))
-            if is_cry and tagdict is not None:
-                for pr in tags.check(src, tr, tagdict):
-                    warn.append((doc['source'], e['id'], pr))
-            if enc == 'cp932':
-                bad = sorted({c for c in tr if not _sjis_ok(c)})
-                if bad:
-                    warn.append((doc['source'], e['id'],
-                                 f"літер немає в кодуванні гри: {' '.join(bad)}"))
+                    for sc in screens:
+                        sc['w'] += [metrics.width(x, sc['wtab'], game) for x in e['src'].split('\n')]
+    for sc in screens:
+        # межа вікна — виміряна в грі (DIALOG_WIDTH), інакше не найширший оригінал
+        # (там бувають викиди, що й у грі не влазять: «(´・ω・｀) Aaaaaah...» у
+        # Neptunia), а 99,9% рядків оригіналу
+        w = sorted(sc.pop('w')) or [0]
+        sc['lim'] = DIALOG_WIDTH.get((game, sc['id'])) or w[min(len(w) - 1, int(len(w) * DIALOG_PCT))]
+    return {'wtab': wtab, 'game': game, 'gmax': gmax, 'gcount': gcount, 'glines': glines,
+            'screens': screens}
+
+
+DIALOG_PCT = 0.999          # частка рядків оригіналу, що мусить уміститися у вікні діалогу
+# Ширина вікна діалогу, виміряна в грі (px шрифту гри): тестові рядки, де гра обрізає текст
+# (2026-09-26, п'ять рядків на кожне вікно дали ту саму межу ±4 px). Гра не переносить — обрізає.
+DIALOG_WIDTH = {('nep', 'adv'): 790,        # головне вікно, advfont: видно 787, обрізано з 794
+                ('nep', 'msg'): 726,        # історія діалогів, msgfont: видно 723, обрізано з 730
+                # MSK (2026-09-26, рядок-лінійка): головне вікно НЕ обрізає — текст лізе на рамку;
+                # внутрішній край вікна ≈ x 1755 з 1920 при масштабі 1,056 екр. px на px шрифту →
+                # ≈1290, беремо 1280. Історія (Backlog) обрізає: видно 1032, зникло з 1044
+                ('msk', 'msg'): 1280,
+                ('msk', 'log'): 1036}
+
+
+def width_limit(doc, e, ctx, screen=None):
+    """(межа ширини в px, скільки рядків уміщає місце | None, ширини рядків оригіналу)
+    — за шрифтом гри (ctx['wtab'] є). Для діалогів — у шрифті `screen`
+    (ctx['screens'], за замовчуванням перший: головне вікно)."""
+    import metrics
+    wtab, game = ctx['wtab'], ctx['game']
+    g = _width_group(doc, e)
+    if g == ('діалог',) and ctx.get('screens'):
+        screen = screen or ctx['screens'][0]
+        wtab = screen['wtab']
+    wsrc = [metrics.width(x, wtab, game) for x in e['src'].split('\n')]
+    lines = None
+    if g is not None and (g == ('діалог',) or ctx['gcount'].get(g, 0) >= 5):
+        lines = ctx['glines'][g]
+    if g == ('діалог',):
+        lim = screen['lim'] if screen else ctx['gmax'][g]
+    elif g is not None and ctx['gcount'].get(g, 0) >= 5:
+        lim = max(ctx['gmax'][g], max(wsrc) * 1.1)
+    else:
+        lim = max(max(wsrc) * 1.35, max(wsrc) + 6 * (wtab.get('n') or 12))
+    return lim, lines, wsrc
+
+
+def check_entry(doc, e, ctx, terms=None, tagdict=None):
+    """Попередження до перекладу одного рядка (без source/id); ctx — limits()."""
+    import glossary, metrics
+    out = []
+    tr = e.get('tr')
+    if not tr or doc.get('format') == 'atlas':
+        return out
+    enc = doc.get('encoding')
+    is_cry = doc.get('game') == 'crystar'
+    wtab, game = ctx['wtab'], ctx['game']
+    gmax, gcount, glines = ctx['gmax'], ctx['gcount'], ctx['glines']
+    src = e['src']
+    for en, ua in glossary.missing(src, tr, terms or []):
+        out.append(f'термін «{en}» → «{ua}»: у перекладі не знайдено')
+    g = _width_group(doc, e)
+    n_src, n_tr = _nlines(src), _nlines(tr)
+    if g is not None and (g == ('діалог',) or gcount.get(g, 0) >= 5):
+        # переносити можна по-своєму — аби рядків не стало більше, ніж уміщає місце
+        if n_tr > glines[g]:
+            where = 'вікно діалогу вміщає' if g == ('діалог',) else 'в оригіналах цього поля'
+            out.append(f'рядків {n_tr} — {where} не більше {glines[g]}')
+    elif n_src != n_tr:
+        out.append(f"переносів рядка: було {n_src}, стало {n_tr}")
+    if wtab:
+        # діалог — кожен екран своїм шрифтом (досить першого, де не влазить)
+        for sc in (ctx.get('screens') or [None]) if g == ('діалог',) else [None]:
+            lim, _lines, wsrc = width_limit(doc, e, ctx, sc)
+            wtr = [metrics.width(x, sc['wtab'] if sc else wtab, game) for x in tr.split('\n')]
+            if max(wtr) > lim:
+                where = sc['назва'] if sc else 'місце на екрані'
+                out.append(f'рядок ширший за {where}: {max(wtr)} px при межі {round(lim)} px '
+                           f'(оригінал {max(wsrc)} px) — перенеси рядок або скороти')
+                break
+    else:
+        for a, b in zip(src.split('\n'), tr.split('\n')):
+            if len(b) > max(len(a) + 6, len(a) * 1.35):
+                out.append(f'рядок довший за оригінал: {len(a)} -> {len(b)} символів')
+                break
+    if doc.get('game') == 'msk':
+        bad = mchars.missing(tr)
+        if bad:
+            out.append(f"гра не покаже: {' '.join(bad)} (потрібен гліф у шрифті)")
+        res = sorted(set(tr) & getattr(mchars, 'RESERVED', set()))
+        if res:
+            out.append(f"у грі замість {' '.join(res)} з'являться українські "
+                       f"літери — прибери ці символи")
+    if doc.get('game') == 'nep':
+        from neptunia import chars as nchars
+        bad = nchars.bad_chars(tr)
+        if bad:
+            out.append(f"гра не покаже: {' '.join(bad)} (буде «?»)")
+        for c, n in (nep_codes(src) - nep_codes(tr)).items():
+            out.append(f'бракує коду {c}' + (f' ×{n}' if n > 1 else ''))
+        for c in nep_codes(tr) - nep_codes(src):
+            out.append(f'зайвий код {c}')
+    if e.get('cap') and doc.get('game') == 'nep':
+        from neptunia import chars as nchars
+        need = len(nchars.encode(tr, 'replace')) + 1
+        if need > e['cap']:
+            out.append(f"задовго: {need - 1} при ліміті {e['cap'] - 1} символів — "
+                       f"лишиться англійським")
+    elif e.get('cap'):
+        need = len(tr.encode(enc or 'utf-8', 'replace')) + 1
+        if need > e['cap']:
+            out.append(f"задовго: {need} Б при ліміті {e['cap']} Б")
+    if doc.get('game') == 'msk':
+        miss = msk_codes(src) - msk_codes(tr)
+        for c, n in miss.items():
+            out.append(f'бракує коду {c}' + (f' ×{n}' if n > 1 else ''))
+        extra = msk_codes(tr) - msk_codes(src)
+        for c in extra:
+            out.append(f'зайвий код {c} — гра може впасти')
+    if is_cry and tagdict is not None:
+        for pr in tags.check(src, tr, tagdict):
+            out.append(pr)
+    if enc == 'cp932':
+        bad = sorted({c for c in tr if not _sjis_ok(c)})
+        if bad:
+            out.append(f"літер немає в кодуванні гри: {' '.join(bad)}")
+    return out
+
+
+def validate(work_dir, backup_dir=None, terms=None):
+    """[(source, id, попередження)]; terms — глосарій (glossary.load), щоб ловити
+    рядки, де термін в оригіналі є, а його перекладу немає."""
+    warn = []
+    validate.src = {}                       # (source, id) -> оригінал: для переходу до рядка
+    validate.tr = {}                        # (source, id) -> переклад: для «Затверджено»
+    files = collect(work_dir)
+    tagdict = tags.build_dict(files) if any(s.startswith('parameter/') for s, _ in files) else None
+    docs = [d for d in (locfile.load_json(p) for p in sorted(locfile.walk(work_dir))) if d]
+    docs = [d for d in docs if d.get('format') != 'atlas']
+    ctx = limits(docs, backup_dir or _backup_of(work_dir), os.path.dirname(os.path.abspath(work_dir)))
+    for doc in docs:
+        for e in doc['entries']:
+            if not e.get('tr'):
+                continue
+            validate.src[(doc['source'], e['id'])] = e['src']
+            validate.tr[(doc['source'], e['id'])] = e['tr']
+            for m in check_entry(doc, e, ctx, terms, tagdict):
+                warn.append((doc['source'], e['id'], m))
     return warn
 
 

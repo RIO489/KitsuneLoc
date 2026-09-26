@@ -14,6 +14,8 @@ import json, os, re
 
 MSK_FONT = ('System.bra', 'window\\font\\msgfont.ffu')
 NEP_FONT = ('data/SYSTEM00000.pac', 'window/font/msgfont.ffu')
+# Neptunia: головне вікно діалогу малює advfont (ширший), історія діалогів — msgfont
+NEP_FONTS = {'msg': 'window/font/msgfont.ffu', 'adv': 'window/font/advfont.ffu'}
 
 # службові коди не малюються: прибираємо перед вимірюванням
 _MSK_CODE = re.compile(r'%[-+ 0#]*\d*(?:\.\d+)?[a-zA-Z]|#[A-Za-mo-z]')
@@ -26,7 +28,7 @@ def _font_file(game, backup_dir):
     return p if os.path.exists(p) else None
 
 
-def _build(game, path):
+def _build(game, path, font='msg'):
     if game == 'msk':
         from maryskelter.bra import Bra
         from maryskelter import fontfix, ffu, chars
@@ -46,7 +48,7 @@ def _build(game, path):
         return tab
     from neptunia.pac import Pac
     from neptunia import fontfix, ffu, chars
-    data, _rep = fontfix.fix(Pac(path).read(NEP_FONT[1]))
+    data, _rep = fontfix.fix(Pac(path).read(NEP_FONTS[font]))
     f = ffu.Ffu(data)
     tab = {}
     for code, i in f.map.items():
@@ -66,14 +68,17 @@ def _build(game, path):
     return tab
 
 
-def table(game, backup_dir, cache_dir):
-    """{символ: ширина в px} або None (немає шрифту чи гра без метрик)."""
-    if game not in ('msk', 'nep'):
+def table(game, backup_dir, cache_dir, font='msg'):
+    """{символ: ширина в px} або None (немає шрифту чи гра без метрик).
+    font — 'msg' (msgfont: інтерфейс, таблиці, історія діалогів) або 'adv'
+    (Neptunia: advfont головного вікна діалогу)."""
+    if game not in ('msk', 'nep') or (font != 'msg' and game != 'nep'):
         return None
     path = _font_file(game, backup_dir)
     if not path:
         return None
-    cache = os.path.join(cache_dir, f'_ширини_{game}.json')
+    cache = os.path.join(cache_dir, f'_ширини_{game}.json' if font == 'msg'
+                         else f'_ширини_{game}_{font}.json')
     st = os.stat(path)
     sig = f'{st.st_size}:{int(st.st_mtime)}:{_code_sig()}'
     try:
@@ -83,7 +88,7 @@ def table(game, backup_dir, cache_dir):
     except (OSError, ValueError):
         pass
     try:
-        tab = _build(game, path)
+        tab = _build(game, path, font)
     except Exception:
         return None
     try:

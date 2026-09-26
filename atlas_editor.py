@@ -9,7 +9,7 @@
 """
 import os, queue, threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, colorchooser
 
 from PIL import Image, ImageTk
 
@@ -23,6 +23,7 @@ BG = (32, 32, 40, 255)
 MAX_W = 380             # ширина прев'ю в пікселях екрана
 MAX_VARIANTS = 4        # скільки різних варіантів кнопки показувати
 DELAY = 180             # мс тиші після набору, перш ніж перемальовувати
+LOOK = ('заливка', 'обведення', 'квадратність')     # правки вигляду, окремі від шрифту
 
 
 class Atlases:
@@ -143,7 +144,10 @@ class Editor(tk.Toplevel):
         self.game = app.cur['game']
         self.book_name = BOOKS[self.game]
         self.book = os.path.join(xl, self.book_name)
-        if not os.path.exists(self.book):
+        import project
+        # з версії 1.7 переклад може жити в програмі (редактор) — тоді пишемо туди, не в книгу
+        self.pr = app.get_project() if project.enabled(xl) else None
+        if self.pr is None and not os.path.exists(self.book):
             self.destroy()
             raise RuntimeError(f'Книги «{self.book_name[:-5]}» ще немає — '
                                'спершу натисни «1. Дістати текст з гри».')
@@ -178,6 +182,11 @@ class Editor(tk.Toplevel):
 
     # ---------------------------------------------------------------- книга
     def _read_book(self):
+        if self.pr is not None:
+            return [{'id': r['e']['id'], 'src': r['e']['src'], 'tr': r['e'].get('tr', ''),
+                     'where': r['who'] if isinstance(r['who'], str) else ', '.join(r['who'] or []),
+                     'key': r['k']}
+                    for r in self.pr.rows if r['source'].startswith('@атлас/')]
         from openpyxl import load_workbook
         wb = load_workbook(self.book, read_only=True, data_only=True)
         ws = wb[SHEET]
@@ -196,6 +205,23 @@ class Editor(tk.Toplevel):
 
     def _save(self):
         if not self.edits:
+            return True
+        if self.pr is not None:
+            keys = {r['id']: r['key'] for r in self.rows}
+            changed = []
+            for i, v in self.edits.items():
+                changed += self.pr.set_tr(keys[i], v)
+            self.pr.save()
+            win = getattr(self.app, 'editor_win', None)
+            if win is not None and win.winfo_exists():
+                win._update_rows(changed)
+            for r in self.rows:
+                if r['id'] in self.edits:
+                    r['tr'] = self.pr.tr(r['key'])
+            n = len(self.edits)
+            self.edits.clear()
+            self.saved.set(f'Збережено: {n}. Далі — «2. Залити переклад у гру».')
+            self._fill(keep=True)
             return True
         lock = os.path.join(os.path.dirname(self.book), '~$' + self.book_name)
         if os.path.exists(lock):
@@ -309,6 +335,28 @@ class Editor(tk.Toplevel):
         self.b_apply = ttk.Button(tools, text='Записати в розмітку', command=self._apply_look)
         self.b_apply.pack(side='left', padx=8)
         self.b_apply.state(['disabled'])
+        # колір літер, обведення, квадратність — пробні правки стилю, як і шрифт
+        paint = ttk.Frame(right)
+        paint.pack(fill='x', pady=(6, 0))
+        ttk.Label(paint, text='Літери:').pack(side='left')
+        self.b_fill = tk.Button(paint, width=4, relief='groove', cursor='hand2',
+                                command=self._pick_fill)
+        self.b_fill.pack(side='left', padx=(4, 12))
+        ttk.Label(paint, text='Обведення:').pack(side='left')
+        self.b_line = tk.Button(paint, width=4, relief='groove', cursor='hand2',
+                                command=self._pick_line)
+        self.b_line.pack(side='left', padx=4)
+        self.line_w = tk.StringVar()
+        ttk.Spinbox(paint, from_=0, to=8, increment=0.5, width=4, textvariable=self.line_w,
+                    command=self._line_width).pack(side='left')
+        self.line_w.trace_add('write', lambda *_: self._line_width())
+        ttk.Label(paint, text='px').pack(side='left', padx=(2, 12))
+        self.sq_lbl = ttk.Label(paint, width=16)
+        self.sq_lbl.pack(side='left')
+        self.sq = tk.DoubleVar(value=0)
+        ttk.Scale(paint, from_=0, to=1, variable=self.sq, length=140,
+                  command=lambda _v: self._square()).pack(side='left', padx=4)
+        ttk.Button(paint, text='Як у стилі', command=self._paint_reset).pack(side='left', padx=8)
         self.look = tk.StringVar()
         ttk.Label(right, textvariable=self.look, style='Hint.TLabel').pack(anchor='w')
         self.suggest = {}                        # ключ -> підібрані правки стилю (ще не в розмітці)
@@ -373,6 +421,7 @@ class Editor(tk.Toplevel):
         self._loading = True
         self.text.set(self._value(r))
         self.real.set(any(s.get('літери з оригіналу') for _src, _i, s in variants(self.marks, self.cur)))
+        self._paint_show()
         self._loading = False
         self._look_status()
         self.entry.focus_set()
@@ -467,6 +516,117 @@ class Editor(tk.Toplevel):
 
 
     # ------------------------------------------------------- вигляд напису
+    def look_of(self, key):
+        """Пробні правки вигляду (колір, обведення, квадратність) напису."""
+        return {k: v for k, v in (self.suggest.get(key) or {}).items() if k in LOOK}
+
+    def _style(self, key, tried=True):
+        """Стиль першого варіанта напису з правками розмітки (і пробними)."""
+        _src, _i, spec = variants(self.marks, key)[0]
+        st = dict(self.styles[spec['стиль']])
+        st.update(spec.get('правки', {}))
+        if tried:
+            st.update(self.suggest.get(key) or {})
+        return st
+
+    def _paint_show(self):
+        """Кнопки кольорів і повзунок — за поточним стилем напису."""
+        if not self.cur or not variants(self.marks, self.cur):
+            return
+        st = self._style(self.cur)
+        fill = st.get('заливка', '#ffffff')
+        first = fill[0] if isinstance(fill, list) else fill
+        self.b_fill.configure(bg=first[:7], activebackground=first[:7],
+                              text='⇅' if isinstance(fill, list) else '')   # ⇅ — градієнт
+        o = st.get('обведення') or {}
+        col = o.get('колір', '#000000')[:7] if o.get('товщина') else self.cget('bg')
+        self.b_line.configure(bg=col, activebackground=col, text='' if o.get('товщина') else '—')
+        self.line_w.set(f'{o.get("товщина", 0):g}')
+        self.sq.set(st.get('квадратність', 0))
+        self.sq_lbl.configure(text=f'Квадратність {self.sq.get():.2f}')
+
+    def _paint_refresh(self):
+        self._loading = True
+        self._paint_show()
+        self._loading = False
+
+    def _set_look(self, k, v):
+        """Пробна правка вигляду; така сама, як у розмітці, — прибирається."""
+        key = self.cur
+        if not key:
+            return
+        e = dict(self.suggest.get(key) or {})
+        if v == self._style(key, tried=False).get(k, 0 if k == 'квадратність' else None):
+            e.pop(k, None)
+        else:
+            e[k] = v
+        if e:
+            self.suggest[key] = e
+        else:
+            self.suggest.pop(key, None)
+        self._look_status()
+        self._schedule(DELAY)
+
+    @staticmethod
+    def _with_alpha(new, old):
+        """#rrggbb з вибору кольору + прозорість старого #rrggbbaa."""
+        return new + old[7:9] if isinstance(old, str) and len(old) == 9 else new
+
+    def _pick_fill(self):
+        if not self.cur:
+            return
+        old = self._style(self.cur).get('заливка', '#ffffff')
+        first = old[0] if isinstance(old, list) else old
+        got = colorchooser.askcolor(first[:7], parent=self, title='Колір літер')[1]
+        if got:
+            self._set_look('заливка', self._with_alpha(got, first))
+            self._paint_refresh()
+
+    def _pick_line(self):
+        if not self.cur:
+            return
+        o = dict(self._style(self.cur).get('обведення') or {})
+        got = colorchooser.askcolor(o.get('колір', '#000000')[:7], parent=self,
+                                    title='Колір обведення')[1]
+        if got:
+            o['колір'] = self._with_alpha(got, o.get('колір'))
+            o['товщина'] = o.get('товщина') or 2
+            self._set_look('обведення', o)
+            self._paint_refresh()
+
+    def _line_width(self):
+        if getattr(self, '_loading', False) or not self.cur:
+            return
+        try:
+            w = max(0.0, min(8.0, float(self.line_w.get().replace(',', '.'))))
+        except ValueError:
+            return
+        o = dict(self._style(self.cur).get('обведення') or {'колір': '#000000'})
+        if w == o.get('товщина', 0):
+            return
+        o['товщина'] = w
+        self._set_look('обведення', o)
+        col = o['колір'][:7] if w else self.cget('bg')
+        self.b_line.configure(bg=col, activebackground=col, text='' if w else '—')
+
+    def _square(self):
+        v = round(self.sq.get(), 2)
+        self.sq_lbl.configure(text=f'Квадратність {v:.2f}')
+        if not getattr(self, '_loading', False):
+            self._set_look('квадратність', v)
+
+    def _paint_reset(self):
+        """Прибрати пробні колір, обведення й квадратність (шрифт лишається)."""
+        key = self.cur
+        e = {k: v for k, v in (self.suggest.get(key) or {}).items() if k not in LOOK}
+        if e:
+            self.suggest[key] = e
+        else:
+            self.suggest.pop(key, None)
+        self._paint_refresh()
+        self._look_status()
+        self._schedule(0)
+
     def _marked_real(self, key):
         return any(s.get('літери з оригіналу') for _src, _i, s in variants(self.marks, key))
 
@@ -475,12 +635,23 @@ class Editor(tk.Toplevel):
         changed = key in self.suggest or self.real.get() != self._marked_real(key)
         self.b_apply.state(['!disabled'] if changed else ['disabled'])
         if key in self.suggest:
-            e = self.suggest[key]
-            var = e.get('варіація') or {}
-            self.look.set(f'Пробний шрифт: {e["шрифт"]}' +
-                          (f', товщина {var["wght"]}' if 'wght' in var else '') +
-                          f', нахил {e["нахил"]}, розтяг {e["розтяг"]}, розрядка {e.get("розрядка", 0)}'
-                          ' — ще не записано.')
+            e, parts = self.suggest[key], []
+            if 'шрифт' in e:
+                var = e.get('варіація') or {}
+                parts.append(f'шрифт {e["шрифт"]}' +
+                             (f', товщина {var["wght"]}' if 'wght' in var else '') +
+                             f', нахил {e["нахил"]}, розтяг {e["розтяг"]}')
+            if 'заливка' in e:
+                parts.append(f'літери {e["заливка"]}')
+            if 'обведення' in e:
+                o = e['обведення']
+                parts.append(f'обведення {o.get("колір", "#000000")} {o.get("товщина", 0):g} px'
+                             if o.get('товщина') else 'без обведення')
+            if e.get('квадратність'):
+                parts.append(f'квадратність {e["квадратність"]:.2f}')
+            self.look.set('Пробне: ' + '; '.join(parts) + ' — ще не записано.' +
+                          (' Зі «Справжніми літерами» колір і квадратність не діють.'
+                           if self.real.get() and set(e) & set(LOOK) else ''))
         elif changed:
             self.look.set('«Справжні літери» змінено лише для прев\'ю — ще не записано.')
         else:
@@ -495,11 +666,14 @@ class Editor(tk.Toplevel):
             FontGallery(self, self.cur)
 
     def _chosen(self, key, edit):
-        """Шрифт, вибраний у галереї: лише для прев'ю, поки не записано."""
-        if edit is None:
-            self.suggest.pop(key, None)
+        """Шрифт, вибраний у галереї: лише для прев'ю, поки не записано.
+        Пробні колір і квадратність лишаються."""
+        new = self.look_of(key)
+        new.update(edit or {})
+        if new:
+            self.suggest[key] = new
         else:
-            self.suggest[key] = edit
+            self.suggest.pop(key, None)
         if key == self.cur:
             self._look_status()
             self._schedule(0)
@@ -536,8 +710,9 @@ class Editor(tk.Toplevel):
             mod.save_marks(marks)
             self.marks = {k: v for k, v in marks.items() if not k.startswith('_')}
         self._look_status()
-        self.look.set(f'Повернуто стандартний шрифт у розмітці: кадрів {n}.' if n else
-                      'Стандартний шрифт (у розмітці інший і не записували).')
+        self.look.set(f'Повернуто стандартний вигляд у розмітці: кадрів {n}.' if n else
+                      'Стандартний вигляд (у розмітці інший і не записували).')
+        self._paint_refresh()
         self._schedule(0)
 
     def _apply_all(self, edit):
@@ -604,6 +779,7 @@ class Editor(tk.Toplevel):
         self.marks = {k: v for k, v in marks.items() if not k.startswith('_')}
         self._look_status()
         self.look.set(f'Записано в розмітку: кадрів {n}.')
+        self._paint_refresh()
         self._schedule(0)
 
 
@@ -752,7 +928,9 @@ class FontGallery(tk.Toplevel):
         self.gen += 1
         gen, ed = self.gen, self.ed
         text = self.text.get().strip() or self.spec['текст']
-        edits = [self._edit(d, fn) for d, fn in self.fonts]
+        look = ed.look_of(self.key)                # пробні колір і квадратність — на всіх картках
+        edits = [dict(look, **e) if e else (look or None)
+                 for e in (self._edit(d, fn) for d, fn in self.fonts)]
         spec0, real, game = self.spec, ed.real.get(), ed.game
 
         def work():
