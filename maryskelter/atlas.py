@@ -317,6 +317,9 @@ def erase(img, box, spec):
     if spec.get('тло') == 'смуга':                  # напис на смузі: смугу малюємо наново (_band)
         img.paste((0, 0, 0, 0), box)
         return
+    if spec.get('тло') == 'штрих':                  # похилі смужки на картці (наліпки Neptunia)
+        _hatch(img, box, spec)
+        return
     if spec.get('тло') == 'похила':                 # похила смуга: над нею — одне, у ній — інше
         s = spec['похила']
         (ta, tb), (ba, bb) = s['верх'], s['низ']       # y = a*x + b у координатах кадру
@@ -489,6 +492,66 @@ def draw(img, box, spec, styles, text, info=None):
     frame.alpha_composite(layer)
     img.paste(frame, box[:2])
     return warn
+
+
+def _hatch(img, box, spec):
+    """Тло «штрих»: картка в похилу смужку, текст на ній (EXP UP!, TOUGH
+    ENEMIES! у Neptunia). З чистого шматка картки "зразок" [x0, y0, x1, y1]
+    знаходимо нахил і крок смужок (колір залежить лише від (x + k·y) mod P) і
+    заливаємо такими самими смужками многокутник "полігон" [[x, y], ...] —
+    місце старого тексту всередині картки, без рамки й іконок. Координати — кадру."""
+    import numpy as np
+    fx, fy = box[0], box[1]
+    frame = np.asarray(img.crop(box).convert('RGBA')).astype(float)
+
+    def patch(rect, src):
+        x0, y0, x1, y1 = rect
+        ys, xs = np.mgrid[y0:y1, x0:x1]
+        return xs.ravel().astype(float), ys.ravel().astype(float), src[y0:y1, x0:x1].reshape(-1, 4)
+
+    # нахил і крок — із "зразок-кут" (більший чистий шматок сусідньої такої ж картки,
+    # координати атласу), якщо свій зразок замалий; колір і фаза — завжди зі свого
+    if spec.get('зразок-кут'):
+        X, Y, C = patch(spec['зразок-кут'], np.asarray(img.convert('RGBA')).astype(float))
+    else:
+        X, Y, C = patch(spec['зразок'], frame)
+    def search(ks, ps):
+        best = None
+        for k in ks:
+            u = X + k * Y
+            for P in ps:
+                b = np.floor((u % P) / P * 10).astype(int)
+                n = np.bincount(b, minlength=10)
+                s = np.array([np.bincount(b, C[:, c], 10) for c in range(3)])
+                s2 = np.array([np.bincount(b, C[:, c] ** 2, 10) for c in range(3)])
+                err = (s2 - s ** 2 / np.maximum(n, 1)).sum()
+                if best is None or err < best[0]:
+                    best = (err, k, P)
+        return best
+    # грубо, потім точніше навколо знайденого
+    _e, k, P = search(np.arange(-2.5, 2.5001, 0.1), np.arange(3.0, 16.0, 0.5))
+    _e, k, P = search(np.arange(k - 0.12, k + 0.1201, 0.02), np.arange(max(2.5, P - 0.6), P + 0.61, 0.05))
+    X, Y, C = patch(spec['зразок'], frame)
+    B = 32                                              # профіль однієї смужки, 32 відліки
+    b = np.floor(((X + k * Y) % P) / P * B).astype(int)
+    n = np.bincount(b, minlength=B)
+    prof = np.array([np.bincount(b, C[:, c], B) for c in range(4)]) / np.maximum(n, 1)
+    have = n > 0
+    if not have.all():                                  # порожні відліки — з сусідніх
+        idx = np.arange(B)
+        for c in range(4):
+            prof[c] = np.interp(idx, idx[have], prof[c][have], period=B)
+    mask = Image.new('L', (box[2] - box[0], box[3] - box[1]), 0)
+    ImageDraw.Draw(mask).polygon([tuple(p) for p in spec['полігон']], fill=255)
+    m = np.asarray(mask) > 127
+    yy, xx = np.nonzero(m)
+    t = ((xx + k * yy) % P) / P * B
+    i0 = np.floor(t).astype(int) % B
+    i1 = (i0 + 1) % B
+    f = (t - np.floor(t))[None, :]
+    col = prof[:, i0] * (1 - f) + prof[:, i1] * f
+    frame[yy, xx] = col.T
+    img.paste(Image.fromarray(np.clip(frame + 0.5, 0, 255).astype(np.uint8), 'RGBA'), (fx, fy))
 
 
 def _band(orig, nx0, nx1):

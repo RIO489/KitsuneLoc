@@ -47,6 +47,10 @@ def text_for(spec, tr):
     (вони намальовані в сусідньому кадрі)."""
     if spec.get('малювати'):
         return spec['малювати']
+    if 'частина' in spec:                   # два спрайти поруч (NEW | RECORD!): слово — сюди,
+        parts = tr.split(' ', 1)             # решта — у другий
+        i = spec['частина']
+        return parts[i] if i < len(parts) else ''
     if spec.get('обрізати'):
         return tr.rstrip(spec['обрізати']) or tr
     return tr
