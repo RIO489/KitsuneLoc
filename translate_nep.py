@@ -6,6 +6,8 @@
   python translate_nep.py seed   <тека гри> <work_dir> <тека з перекладеними .pac>
          (одноразово: забрати вже зроблений переклад зі старих перекладених архівів)
   python translate_nep.py font   <тека гри> <out_dir>   (лише шрифти, для перевірки)
+  python translate_nep.py jp     <тека гри> <тека або .zip з дампами японської версії>
+         (колонка «Японська»: збирає neptunia/японська.json, далі її дописує export)
 
 Де текст (усе — в архівах DW_PACK .pac, neptunia/pac.py):
   data/SYSTEM00000.pac  database/*.gbin|*.gstr — меню, предмети, навички, Непедія…;
@@ -21,7 +23,7 @@
 Змінені файли в архіві пишуться нестисненими, порядок записів зберігається —
 тож індекси data/*.cpk (ім'я -> номер запису) лишаються дійсними.
 """
-import argparse, glob, os, re, sys
+import argparse, glob, json, os, re, sys, unicodedata
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from neptunia.pac import Pac
@@ -179,6 +181,8 @@ def _looks_translated(texts):
 # --------------------------------------------------------------------- експорт
 def cmd_export(a, progress=None):
     names = _event_names(a)
+    jp = _jp_load()
+    n_ja = 0
     total_cyr = {}
     for arc in archives(a.game_dir):
         pac = Pac(_orig(a, arc))
@@ -209,11 +213,18 @@ def cmd_export(a, progress=None):
                 total_cyr[arc] = total_cyr.get(arc, 0) + _looks_translated(
                     x['src'] for x in items)
                 meta['encoding'] = 'nep'
+                ja = jp.get(_source(arc, e.name), {})
+                for x in items:
+                    if ja.get(x['id']) and x.get('kind') != 'key':
+                        x['ja'] = ja[x['id']]
+                        n_ja += 1
                 locfile.save_rich(a.work_dir, GAME, _source(arc, e.name), kind, items, meta)
                 n_docs += 1
                 n_str += len(items)
         if n_docs:
             print(f'  {arc}: файлів {n_docs}, рядків {n_str}')
+    print(f'  з японським оригіналом: {n_ja} рядків' if n_ja else
+          f'  (немає neptunia\\{os.path.basename(JP_FILE)} — без японської колонки)')
     n_atl = _export_atlas(a)
     if n_atl:
         print(f'  написи на картинках: {n_atl}')
@@ -614,6 +625,131 @@ def cmd_txt(a, progress=None):
     return st
 
 
+# ------------------------------------------------------------------ японська
+# японський оригінал ({source: {id: текст}}) з дампів neptools японської версії
+# (`*.gbin.txt`, `*.gstr.txt`, `main.cl3.txt`); у .gitignore — передавати файлом
+JP_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'neptunia', 'японська.json')
+_JP_CODES = re.compile(r'%[-+ #0-9.]*[sdfuxXc]|#[A-Za-z]+(?:\[[^\]]*\])?')
+
+
+def _jp_load():
+    if os.path.exists(JP_FILE):
+        with open(JP_FILE, encoding='utf-8') as f:
+            return json.load(f)
+    return {}
+
+
+def _jp_files(path):
+    """(відносний шлях, байти) усіх .txt у теці або в .zip (вкладені .zip теж)."""
+    import io, zipfile
+
+    def walk_zip(z, pre):
+        for i in z.infolist():
+            if i.is_dir():
+                continue
+            if i.filename.lower().endswith('.zip'):
+                yield from walk_zip(zipfile.ZipFile(io.BytesIO(z.read(i))),
+                                    pre + i.filename[:-4] + '/')
+            elif i.filename.lower().endswith('.txt'):
+                yield pre + i.filename, z.read(i)
+
+    if os.path.isdir(path):
+        for dp, _d, fs in os.walk(path):
+            for fn in fs:
+                if fn.lower().endswith('.txt'):
+                    p = os.path.join(dp, fn)
+                    yield os.path.relpath(p, path).replace('\\', '/'), open(p, 'rb').read()
+    else:
+        yield from walk_zip(zipfile.ZipFile(path), '')
+
+
+def _jp_source(rel, by_pac):
+    """Шлях дампу -> source: як у _txt_source, а без теки архіву — за будовою шляху
+    (…/0101/main.cl3.txt — сцена GAME00000, st*.gbin.txt / str*.gstr.txt — SYSTEM00000)."""
+    src = _txt_source(rel, by_pac)
+    if src:
+        return src
+    m = re.search(r'(?:^|/)(\d{4})/main\.cl3\.txt$', rel, re.I)
+    if m:
+        return f'{MAIN}/event/script/{m.group(1)}/main.cl3'
+    m = re.search(r'(?:^|/)(st\w*\.(?:gbin|gstr))\.txt$', rel, re.I)
+    if m:
+        return f'{SYSTEM}/database/{m.group(1)}'
+    return None
+
+
+def cmd_jp(a, progress=None):
+    """Зібрати JP_FILE з дампів японської версії. Номери neptools переводимо в наші
+    id за англійським файлом (crowdin.ids); файл, де коди %s/#Font… масово не
+    збігаються з англійськими, вважаємо зсунутим і пропускаємо."""
+    from neptunia import crowdin
+    by_pac = {os.path.basename(arc)[:-4].lower(): arc for arc in archives(a.game_dir)}
+    pacs, out, skipped = {}, {}, []
+    files = sorted(_jp_files(a.jp_path))
+    codes = lambda s: sorted(c for c in _JP_CODES.findall(s) if c != NL_GSTR)
+    for k, (rel, raw) in enumerate(files):
+        if progress:
+            progress(k + 1, len(files), rel)
+        src = _jp_source(rel, by_pac)
+        is_dlc = bool(src and re.search(r'(^|/)dlc\d+\.txt$', src, re.I))
+        if not src or not (is_dlc or _kind(src.split('.pac/', 1)[-1])):
+            skipped.append(f'{rel} (не знаю, куди це)')
+            continue
+        arc = src[:src.lower().index('.pac/') + 4]
+        inner = src[len(arc) + 1:]
+        if arc not in pacs:
+            pacs[arc] = Pac(_orig(a, arc))
+        try:
+            blob = pacs[arc].read(inner)
+        except KeyError:
+            skipped.append(f'{rel} (у грі немає {src})')
+            continue
+        if is_dlc:
+            # опис DLC: рядок файлу = рядок книги, якщо будова (роздільники ;) та сама
+            lines = raw.decode('cp932', 'replace').split('\r\n')
+            en = chars.decode(blob).split('\r\n')
+            if len(lines) != len(en) or [x == ';' for x in lines] != [x == ';' for x in en]:
+                skipped.append(f'{rel} (будова не як в англійському файлі)')
+                continue
+            ja = {}
+            for n, t in enumerate(lines):
+                m = re.match(r'^(\d{3}),(.*)$', t)
+                t = m.group(2) if m and n == 0 else t
+                if t.strip() and t != ';' and t != en[n]:
+                    ja[str(n)] = t
+            if ja:
+                out[src] = ja
+            continue
+        g = Gbnl(blob) if _kind(inner) == 'gbnl' else (_stcm_gbnl(blob) or [None] * 4)[3]
+        if g is None:
+            continue
+        idmap = crowdin.ids(g)
+        en = {f'{j}.{fo}': s for j, fo, s, _c in g.strings()}
+        ja = {}
+        for nid, t in crowdin.parse(raw, japanese=True).items():
+            sid = idmap.get(nid)
+            if sid in en and t.strip():
+                if inner.lower().endswith('.gstr'):
+                    t = t.replace(NL_GSTR, '\n')
+                if t != en[sid].replace(NL_GSTR, '\n'):
+                    ja[sid] = t
+        pairs = [(codes(en[s].replace(NL_GSTR, '\n')), codes(unicodedata.normalize('NFKC', t)))
+                 for s, t in ja.items()]
+        pairs = [p for p in pairs if p[0] or p[1]]
+        bad = sum(x != y for x, y in pairs)
+        if bad >= 2 and bad > len(pairs) / 4:
+            skipped.append(f'{rel} (коди не збігаються: {bad} з {len(pairs)} — зсунуто?)')
+            continue
+        if ja:
+            out[src] = ja
+    with open(JP_FILE, 'w', encoding='utf-8') as f:
+        json.dump(out, f, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
+    print(f'  японська: файлів {len(out)}, рядків {sum(map(len, out.values()))} -> {JP_FILE}')
+    for x in skipped:
+        print(f'  ! пропущено: {x}')
+    return out
+
+
 def cmd_font(a, progress=None):
     pac = Pac(_orig(a, SYSTEM))
     os.makedirs(a.out_dir, exist_ok=True)
@@ -638,6 +774,9 @@ def main():
     tx = sp.add_parser('txt'); tx.add_argument('game_dir'); tx.add_argument('work_dir')
     tx.add_argument('txt_dir'); tx.add_argument('--orig', dest='orig_dir')
     tx.set_defaults(fn=cmd_txt)
+    jp = sp.add_parser('jp', help='японський оригінал з дампів neptools (тека або .zip)')
+    jp.add_argument('game_dir'); jp.add_argument('jp_path'); jp.add_argument('--orig', dest='orig_dir')
+    jp.set_defaults(fn=cmd_jp)
     fo = sp.add_parser('font'); fo.add_argument('game_dir'); fo.add_argument('out_dir')
     fo.add_argument('--orig', dest='orig_dir'); fo.set_defaults(fn=cmd_font)
     a = p.parse_args()

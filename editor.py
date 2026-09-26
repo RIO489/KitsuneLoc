@@ -856,6 +856,7 @@ class Editor(tk.Toplevel):
         m.add_command(label='Відв\'язати від однакових', command=lambda: self._detach(keys))
         m.add_command(label='Прив\'язати до однакових', command=lambda: self._attach(keys))
         m.add_separator()
+        m.add_command(label='Вставити з буфера в переклад', command=lambda: self._paste(keys))
         m.add_command(label='Скопіювати оригінал у переклад', command=lambda: self._copy_src(keys))
         m.add_command(label='Очистити переклад', command=lambda: self._clear(keys))
         try:
@@ -942,6 +943,32 @@ class Editor(tk.Toplevel):
         for k in keys:
             changed += self.pr.set_tr(k, self.pr.by_key[k]['e']['src'])
         self._after_bulk(changed, 'Скопійовано оригінал')
+
+    def _paste(self, keys):
+        """Текст з буфера обміну — перекладом виділених рядків."""
+        try:
+            text = self.clipboard_get()
+        except tk.TclError:
+            text = ''
+        text = text.replace('\r\n', '\n').strip('\n')
+        if not text:
+            messagebox.showinfo('Вставити', 'У буфері обміну немає тексту.', parent=self)
+            return
+        self._commit()
+        n = sum(len(self.pr.linked(k)) for k in keys)
+        if n > 1 and not messagebox.askyesno(
+                'Вставити', f'Той самий текст стане перекладом {n} рядків. Далі?', parent=self):
+            return
+        changed = []
+        for k in keys:
+            changed += self.pr.set_tr(k, text)
+        self._after_bulk(changed, 'Вставлено')
+
+    def reload_terms(self):
+        """Глосарій чи жанр змінили у вікні «Терміни…»."""
+        self.terms = glossary.load(self.pr.xl)
+        if self.cur:
+            self._fill_terms()
 
     def _clear(self, keys):
         self._commit()

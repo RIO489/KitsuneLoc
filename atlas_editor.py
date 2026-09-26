@@ -886,6 +886,16 @@ class FontGallery(tk.Toplevel):
         ttk.Button(bot, text='Закрити', command=self._close).pack(side='right')
         ttk.Button(bot, text='Взяти вибраний', command=self._take).pack(side='right', padx=8)
         ttk.Button(bot, text='Для всіх написів…', command=self._take_all).pack(side='right')
+        # свої шрифти (атлас/шрифти/мої, fontlib): з файлу чи з інтернету
+        lib = ttk.Frame(self, padding=(10, 0, 10, 10))
+        lib.pack(fill='x', before=bot)
+        ttk.Label(lib, text='Свої шрифти:').pack(side='left')
+        ttk.Button(lib, text='Додати з файлу…', command=self._add_files).pack(side='left', padx=6)
+        ttk.Button(lib, text='Завантажити з інтернету…', command=self._download).pack(side='left')
+        self.b_remove = ttk.Button(lib, text='Прибрати вибраний', command=self._remove)
+        self.b_remove.pack(side='left', padx=6)
+        ttk.Label(lib, text='.ttf / .otf / .zip; посилання на файл, сторінка fonts.google.com '
+                            'або назва шрифту', style='Hint.TLabel').pack(side='left', padx=6)
         self.protocol('WM_DELETE_WINDOW', self._close)
         self._select(0)
         self._changed(0)
@@ -901,9 +911,12 @@ class FontGallery(tk.Toplevel):
         self.cards[self.sel][0].configure(highlightbackground=c['bg'])
         self.sel = n
         self.cards[n][0].configure(highlightbackground=c.get('accent', '#1f4f82'))
-        fn = self.fonts[n][1]
+        d, fn = self.fonts[n]
         self.status.set('Вибрано: ' + ('стандартний шрифт' if fn is None else fn) +
                         '. «Взяти вибраний» (або подвійний клік) — показати в редакторі.')
+        if hasattr(self, 'b_remove'):
+            from maryskelter import fontlib
+            self.b_remove.configure(state='normal' if d == fontlib.MY_DIR else 'disabled')
 
     def _edit(self, d, fn):
         """Правки стилю для шрифту з бібліотеки при поточних повзунках."""
@@ -1010,3 +1023,68 @@ class FontGallery(tk.Toplevel):
     def _close(self):
         self.gen += 1                           # зупинити фоновий прохід
         self.destroy()
+
+    # ------------------------------------------------------ свої шрифти
+    def _add_files(self):
+        from tkinter import filedialog
+        paths = filedialog.askopenfilenames(
+            parent=self, title='Шрифти для написів',
+            filetypes=[('Шрифти й архіви', '*.ttf *.otf *.zip'), ('Усі файли', '*.*')])
+        if paths:
+            from maryskelter import fontlib
+            self._library(lambda: fontlib.add_files(paths))
+
+    def _download(self):
+        from tkinter import simpledialog
+        text = simpledialog.askstring(
+            'Завантажити шрифт',
+            'Посилання на .ttf / .otf / .zip, сторінка fonts.google.com/specimen/…\n'
+            'або просто назва шрифту з Google Fonts (напр. Rubik Mono One):', parent=self)
+        if text and text.strip():
+            from maryskelter import fontlib
+            self._library(lambda: fontlib.download(text))
+
+    def _remove(self):
+        from maryskelter import fontlib
+        d, fn = self.fonts[self.sel]
+        if d != fontlib.MY_DIR or not messagebox.askyesno(
+                'Прибрати шрифт', f'Прибрати {fn} зі своїх шрифтів?\n(Написи, яким його вже '
+                'записано, його збережуть — він скопійований у атлас/шрифти/.)', parent=self):
+            return
+        fontlib.remove(fn)
+        self._reopen()
+
+    def _library(self, job):
+        """Додати шрифти у фоні (завантаження може тривати), потім показати звіт."""
+        self.status.set('Додаю шрифти…')
+        res = queue.Queue()
+
+        def work():
+            try:
+                res.put(job())
+            except Exception as ex:                                   # noqa: BLE001
+                res.put([f'✗ не вдалося: {ex}'])
+        threading.Thread(target=work, daemon=True).start()
+
+        def wait():
+            if not self.winfo_exists():
+                return
+            try:
+                report = res.get_nowait()
+            except queue.Empty:
+                self.after(100, wait)
+                return
+            added = any(r.startswith('✓') for r in report)
+            messagebox.showinfo('Свої шрифти', '\n'.join(report[:30]) or 'Нічого не додано.',
+                                parent=self)
+            if added:
+                self._reopen()
+            else:
+                self.status.set('Нічого не додано.')
+        wait()
+
+    def _reopen(self):
+        """Перебудувати вікно з новою бібліотекою (картки створюються раз)."""
+        ed, key = self.ed, self.key
+        self._close()
+        FontGallery(ed, key)

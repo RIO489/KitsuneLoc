@@ -18,7 +18,7 @@ Game.bra\\StringData і DATABASE — залишки рушія з іншої г�
 не експортуються. Інтерфейс гри — у TTM1.bra (Text\\*.bin, data\\table.enc),
 TextData*.bin підтримуються, table.enc — ні (стиснений контейнер, у роботі).
 """
-import argparse, json, os, sys, shutil
+import argparse, json, os, re, sys, shutil
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from maryskelter.bra import Bra
@@ -62,16 +62,105 @@ def _orig(a, arc):
 
 
 JP_SCRIPT = 'SCRIPT.cpk'     # японська версія: діалоги EVENT/DATA/*.gbin
+JP_TTM = 'TTM.cpk'           # японська версія: text/textdata.bin, data/table.enc
+JP_HERE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'maryskelter')
+# уся японська, витягнута з .cpk ({source: {id: текст}}): .cpk великі й авторські,
+# на інших ПК їх немає — цей файл можна передати окремо, і колонка «Японська» буде
+JP_FILE = os.path.join(JP_HERE, 'японська.json')
+# англійська TextData.bin = японська + рядок 389 («Toggle voice language.») + рядки
+# в кінці; решта йде тим самим порядком (перевірено за кодами %s/%d: 200 з 200)
+TD_EN_ONLY = 389
 
 
-def _jp_script(a):
-    """Шукаємо SCRIPT.cpk японської версії: у теці maryskelter поруч зі
-    скриптами, в явно вказаній теці (--jp) або в теці гри."""
-    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'maryskelter')
-    for d in (getattr(a, 'jp_dir', None), here, a.game_dir):
-        if d and os.path.exists(os.path.join(d, JP_SCRIPT)):
-            return Cpk(os.path.join(d, JP_SCRIPT))
+def _cpk(a, name):
+    """Шукаємо .cpk японської версії: в явно вказаній теці (--jp), у теці
+    maryskelter поруч зі скриптами або в теці гри."""
+    for d in (getattr(a, 'jp_dir', None), JP_HERE, a.game_dir):
+        if d and os.path.exists(os.path.join(d, name)):
+            return Cpk(os.path.join(d, name))
     return None
+
+
+class _Jp:
+    """Японський оригінал для колонки «Японська»: з .cpk, а без них — з JP_FILE."""
+
+    def __init__(self, a):
+        self.script, self.ttm = _cpk(a, JP_SCRIPT), _cpk(a, JP_TTM)
+        self.saved = {}
+        if os.path.exists(JP_FILE):
+            with open(JP_FILE, encoding='utf-8') as f:
+                self.saved = json.load(f)
+        self.got = {}
+
+    def put(self, source, ja):
+        if ja:
+            self.got[source] = ja
+
+    def apply(self, source, items):
+        """Дописує `ja` у рядки; повертає, чи знайшлась японська."""
+        ja = self.got.get(source) or self.saved.get(source) or {}
+        n = 0
+        for x in items:
+            s = ja.get(x['id'])
+            if s and s != x['src']:
+                x['ja'] = s
+                n += 1
+        return n > 0
+
+    def save(self):
+        new = dict(self.saved)
+        new.update(self.got)
+        if new != self.saved:
+            with open(JP_FILE, 'w', encoding='utf-8') as f:
+                json.dump(new, f, ensure_ascii=False, separators=(',', ':'), sort_keys=True)
+
+
+def _jp_textdata(en, jp):
+    """{індекс англійського рядка: японський} для Text/TextData.bin."""
+    pairs = {}
+    for i, s in enumerate(en):
+        k = i if i < TD_EN_ONLY else i - 1
+        if s and i != TD_EN_ONLY and k < len(jp) and jp[k]:
+            pairs[i] = jp[k]
+    # перевірка зіставлення: коди підстановки мають збігатися
+    codes = lambda s: sorted(re.findall(r'%[-+ #0-9.]*[sdfuxX]|#Icon\[\d+\]', s))
+    both = [(codes(en[i]), codes(j)) for i, j in pairs.items() if codes(en[i]) or codes(j)]
+    if not both or sum(a_ == b_ for a_, b_ in both) < 0.95 * len(both):
+        print('  ! японський TextData.bin не зіставився з англійським — без японської')
+        return {}
+    return {str(i): j for i, j in pairs.items()}
+
+
+def _jp_table(de, dj):
+    """{зсув: японський} для секції .enc: поля в обох версіях за тими самими зсувами.
+    Слот-продовження (після переносу чи не-ASCII символу в англійському) пропускаємо —
+    японський текст поля дістається першому слоту цілком."""
+    out = {}
+    for off, t, _cap in tbl.slots(de, TABLE_ENC):
+        if off and _continues(de, off):
+            continue
+        end = dj.find(b'\0', off)
+        try:
+            s = dj[off:end].decode('utf-8')
+        except UnicodeDecodeError:
+            continue
+        if s and s != t and not s.isascii():
+            out[str(off)] = s
+    return out
+
+
+def _continues(d, off):
+    """Чи продовжує байт перед `off` текст того самого рядка."""
+    c = d[off - 1]
+    if c == 10 or 0x20 <= c < 0x7f:
+        return True
+    for n in (2, 3, 4):
+        try:
+            if len(d[max(0, off - n):off].decode('utf-8')) == 1:
+                return True
+        except UnicodeDecodeError:
+            pass
+    return False
 
 
 def _sid(rec, fo):
@@ -87,7 +176,7 @@ def cmd_export(a, progress=None):
     b = Bra(_orig(a, arc))
     todo = [e for e in b.entries
             if e.name.startswith(prefix) and e.name.lower().endswith('.gbin')]
-    jp = _jp_script(a)
+    jp = _Jp(a)
     n = n_ja = 0
     for k, e in enumerate(todo):
         if progress:
@@ -96,37 +185,44 @@ def cmd_export(a, progress=None):
         items = [{'id': _sid(i, fo), 'src': s} for i, fo, s in g.strings()]
         if not items:
             continue
-        ja = {}
+        source = _source(arc, e.name)
         jname = 'EVENT/DATA/' + e.name.split('\\')[-1]
-        if jp is not None and jname.lower() in jp.by_name:
-            gj = Gbnl(jp.read(jname))
+        if jp.script is not None and jname.lower() in jp.script.by_name:
+            gj = Gbnl(jp.script.read(jname))
             ja = {_sid(i, fo): s for i, fo, s in gj.strings()}
             # пари беремо, лише якщо структура сцени однакова (так у 439 з 440)
-            if gj.struct_count != g.struct_count or set(ja) != {x['id'] for x in items}:
-                ja = {}
-        if ja:
-            for x in items:
-                x['ja'] = ja[x['id']]
-            n_ja += 1
-        locfile.save_rich(a.work_dir, 'msk', _source(arc, e.name), 'gbin', items,
+            if gj.struct_count == g.struct_count and set(ja) == {x['id'] for x in items}:
+                jp.put(source, ja)
+        n_ja += jp.apply(source, items)
+        locfile.save_rich(a.work_dir, 'msk', source, 'gbin', items,
                           {'encoding': g.encoding})
         n += 1
     print(f'  {arc}: {n} файлів діалогів'
-          + (f', з японським оригіналом: {n_ja}' if jp is not None else
-             ' (японського SCRIPT.cpk не знайдено — без японської колонки)'))
+          + (f', з японським оригіналом: {n_ja}' if n_ja else
+             f' (ні японських .cpk, ні maryskelter\\{os.path.basename(JP_FILE)} — без японської колонки)'))
     ui = os.path.join(a.game_dir, UI_ARC)
     if os.path.exists(ui):
         t = Bra(_orig(a, UI_ARC))
+        n_ui_ja = 0
         for name in UI_FILES:
             td = TextData(t.read(name))
+            strs = td.strings()
             items = [{'id': str(i), 'src': s_.replace(NL, '\n')}
-                     for i, s_ in enumerate(td.strings()) if s_]
-            locfile.save_rich(a.work_dir, 'msk', _source(UI_ARC, name), 'textdata', items,
+                     for i, s_ in enumerate(strs) if s_]
+            source = _source(UI_ARC, name)
+            # TextDataEx (налагодження) і в англійській версії японський — пари не треба
+            if jp.ttm is not None and name == UI_FILES[0]:
+                ja = _jp_textdata(strs, TextData(jp.ttm.read('text/textdata.bin')).strings())
+                jp.put(source, {i: s_.replace(NL, '\n') for i, s_ in ja.items()})
+            n_ui_ja += jp.apply(source, items)
+            locfile.save_rich(a.work_dir, 'msk', source, 'textdata', items,
                               {'encoding': 'utf-8', 'newline': NL})
-        print(f'  {UI_ARC}: інтерфейс ({len(UI_FILES)} таблиці)')
-        n_tab = _export_tables(a, t)
+        print(f'  {UI_ARC}: інтерфейс ({len(UI_FILES)} таблиці'
+              + (', з японською)' if n_ui_ja else ')'))
+        n_tab = _export_tables(a, t, jp)
         if n_tab:
             print(f'  {UI_ARC}\\{TABLE_FILE}: {n_tab} рядків у таблицях')
+    jp.save()
     dlc = os.path.join(a.game_dir, DLC_ARC)
     if os.path.exists(dlc):
         db = Bra(_orig(a, DLC_ARC))
@@ -209,12 +305,15 @@ def cmd_import(a, progress=None):
         print(f'  ! …і ще {len(warns) - 30}')
 
 
-def _export_enc(a, arc, name, blob):
-    """Експортувати рядкові слоти одного .enc-контейнера. Повертає к-сть рядків."""
+def _export_enc(a, arc, name, blob, jp=None, jp_blob=None):
+    """Експортувати рядкові слоти одного .enc-контейнера. Повертає к-сть рядків.
+    jp_blob — той самий контейнер японської версії (поля за тими самими зсувами)."""
     e = Enc(blob)
+    ej = Enc(jp_blob) if jp_blob else None
     total = 0
     for sec in e.sections:
         data = e.read(sec)
+        source = _source(arc, f'{name}#{sec.index}')
         items = []
         for off, text, cap in tbl.slots(data, TABLE_ENC):
             it = {'id': str(off), 'src': text, 'cap': cap}
@@ -225,8 +324,11 @@ def _export_enc(a, arc, name, blob):
             continue
         if all(x.get('kind') == 'key' for x in items):
             continue          # суцільні шляхи до моделей і текстур — не для перекладу
-        locfile.save_rich(a.work_dir, 'msk', _source(arc, f'{name}#{sec.index}'),
-                          'table', items, {'encoding': TABLE_ENC})
+        if jp is not None:
+            if ej is not None and sec.index < len(ej.sections):
+                jp.put(source, _jp_table(data, ej.read(ej.sections[sec.index])))
+            jp.apply(source, [x for x in items if x.get('kind') != 'key'])
+        locfile.save_rich(a.work_dir, 'msk', source, 'table', items, {'encoding': TABLE_ENC})
         total += len(items)
     return total
 
@@ -260,8 +362,9 @@ def _import_enc(a, arc, name, blob):
     return (n, warns, e.build(new) if new else None)
 
 
-def _export_tables(a, t):
-    return _export_enc(a, UI_ARC, TABLE_FILE, t.read(TABLE_FILE))
+def _export_tables(a, t, jp=None):
+    jp_blob = jp.ttm.read('data/table.enc') if jp is not None and jp.ttm is not None else None
+    return _export_enc(a, UI_ARC, TABLE_FILE, t.read(TABLE_FILE), jp, jp_blob)
 
 
 def _dlc_files(b):

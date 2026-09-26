@@ -69,6 +69,10 @@ def _font_path(st):
     if not os.path.exists(path):
         path = os.path.join(EXTRA_FONT_DIRS.get(st['шрифт'], os.path.join(FONTS, 'кандидати')),
                             st['шрифт'])
+    if not os.path.exists(path):                    # свій шрифт перекладача (fontlib.MY_DIR)
+        mine = os.path.join(FONTS, 'мої', st['шрифт'])
+        if os.path.exists(mine):
+            path = mine
     return path
 
 

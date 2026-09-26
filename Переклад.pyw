@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.7'
+VERSION = '1.8'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -779,7 +779,7 @@ class App(tk.Tk):
 
     DEPS = (('openpyxl', 'openpyxl'), ('UnityPy', 'UnityPy'), ('PIL', 'Pillow'),
             ('texture2ddecoder', 'texture2ddecoder'), ('etcpak', 'etcpak'),
-            ('sv_ttk', 'sv-ttk'), ('fontTools', 'fonttools'))
+            ('sv_ttk', 'sv-ttk'), ('fontTools', 'fonttools'), ('numpy', 'numpy'))
 
     def _check_deps(self):
         import importlib.util

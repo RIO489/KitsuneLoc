@@ -25,9 +25,10 @@ GREEK = str.maketrans({'Α': 'І', 'Β': 'Ї', 'Γ': 'Ґ', 'Δ': 'Є',
 _SEP = re.compile(r'^―{8,} (\S+)\s*$')
 
 
-def parse(raw):
-    """Байти .txt -> {номер: текст}."""
-    text = chars.decode(raw).translate(GREEK)
+def parse(raw, japanese=False):
+    """Байти .txt -> {номер: текст}. japanese — дамп японської версії: звичайний
+    cp932 (однобайтові коди там — півширинна катакана, а не наша кирилиця)."""
+    text = raw.decode('cp932', 'replace') if japanese else chars.decode(raw).translate(GREEK)
     out, cur, buf = {}, None, []
     # neptools пише переноси як \r\n, але після редагування трапляється й
     # «голий» \n — тоді роздільник наступного рядка прилипав до тексту

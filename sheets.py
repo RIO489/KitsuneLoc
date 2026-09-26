@@ -440,7 +440,7 @@ def export(work_dir, xlsx_dir, game, autofill=True, progress=None):
         made.append((path, 0))
     for i, (name, book) in enumerate(books):
         path = os.path.join(xlsx_dir, f'{name}.xlsx')
-        # колонка «Японська» лише там, де японський текст справді є (в інтерфейсі MSK його немає)
+        # колонка «Японська» лише там, де японський текст справді є (в описах DLC MSK його немає)
         book_ja = game == 'crystar' or any('ja' in e for _s, es in book for e in es)
         made.append((path, safe(path, game, book, autofill, tagdict, has_ja=book_ja, terms=terms) or 0))
         if progress:
