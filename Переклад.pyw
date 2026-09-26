@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.5.2'
+VERSION = '1.6'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -279,6 +279,8 @@ class App(tk.Tk):
         self.b_pics = ttk.Button(bk, text='Написи на картинках (з прев\'ю)…',
                                  command=self.open_pics)
         self.b_pics.pack(side='left', padx=8)
+        self.b_terms = ttk.Button(bk, text='Терміни…', command=self.open_terms)
+        self.b_terms.pack(side='left')
 
         # --- додатково ---------------------------------------------------
         ef = ttk.LabelFrame(self, text=' Додатково ')
@@ -324,8 +326,13 @@ class App(tk.Tk):
         sb = ttk.Scrollbar(lf, orient='vertical', command=self.log.yview)
         self.log.configure(yscrollcommand=sb.set)
         sb.pack(side='right', fill='y')
+        # дівчата гри праворуч у журналі (chibi.py; з'являються після першого «1»)
+        self.chibi = tk.Label(lf, bd=0, anchor='s')
+        self.chibi.pack(side='right', fill='y')
+        self.chibi_photo = None
         self.log.pack(side='left', fill='both', expand=True)
-        self.links = {}                          # тег у лозі -> (source, id, оригінал)
+        self.links = {}                          # тег у лозі -> (гра, source, id, оригінал, …)
+        self.links_shown = {}                    # тег -> чи показано як затверджене
 
     def _step_button(self, parent, text, hint, cmd, accent=False):
         box = ttk.Frame(parent); box.pack(side='left', padx=(0, 10))
@@ -379,6 +386,7 @@ class App(tk.Tk):
         self.log.tag_configure('link', underline=True)
         self.log.tag_bind('link', '<Enter>', lambda e: self.log.configure(cursor='hand2'))
         self.log.tag_bind('link', '<Leave>', lambda e: self.log.configure(cursor=''))
+        self.chibi.configure(bg=c['logbg'])
 
     def _toggle_theme(self):
         self.theme = 'dark' if self.theme == 'light' else 'light'
@@ -416,7 +424,19 @@ class App(tk.Tk):
         save_settings(self.settings)
         self._refresh_path()
 
+    def _show_chibi(self):
+        """Випадкова дівчина поточної гри праворуч у журналі (якщо вже витягнуті)."""
+        try:
+            import chibi
+            from PIL import Image, ImageTk
+            p = chibi.pick(self.game.get())
+            self.chibi_photo = ImageTk.PhotoImage(Image.open(p)) if p else None
+        except Exception:
+            self.chibi_photo = None
+        self.chibi.configure(image=self.chibi_photo or '')
+
     def _refresh_path(self):
+        self._show_chibi()
         self.path_var.set(self.settings.get(self.game.get(), ''))
         if hasattr(self, 'slot_frame'):
             for w in self.slot_frame.winfo_children():
@@ -550,7 +570,7 @@ class App(tk.Tk):
 
     def say_link(self, text, target, tag='warn'):
         """Рядок логу, клік по якому відкриває книгу на потрібному рядку;
-        target = (source, id, оригінал)."""
+        target = (source, id, оригінал, попередження, переклад, затверджено)."""
         self.q.put(('link', (text, tag, target)))
 
     def step(self, i, n, label=''):
@@ -570,14 +590,22 @@ class App(tk.Tk):
         try:
             while True:
                 kind, val = self.q.get_nowait()
-                if kind in ('log', 'link'):
+                if kind in ('log', 'link', 'act'):
                     text, tag = val[:2]
                     tags = (tag,)
                     if kind == 'link':
                         name = f'goto{len(self.links)}'
                         self.links[name] = (self.game.get(),) + tuple(val[2])
+                        self.links_shown[name] = val[2][-1]
                         self.log.tag_bind(name, '<Button-1>',
-                                          lambda e, n=name: self._goto(self.links[n]))
+                                          lambda e, n=name: self._goto(self.links[n][:4]))
+                        self.log.tag_bind(name, '<Button-3>',
+                                          lambda e, n=name: self._link_menu(e, n))
+                        tags = (tag, 'link', name)
+                    elif kind == 'act':                  # посилання-дія (напр. «показати затверджені»)
+                        name = f'act{len(self.links)}'
+                        self.links[name] = val[2]
+                        self.log.tag_bind(name, '<Button-1>', lambda e, n=name: self.links[n]())
                         tags = (tag, 'link', name)
                     self.log.configure(state='normal')
                     self.log.insert('end', text, tags)
@@ -589,6 +617,9 @@ class App(tk.Tk):
                             self.logf.write(text + '\n'); self.logf.flush()
                         except OSError:
                             pass
+                elif kind == 'chibi':
+                    if val == self.game.get():
+                        self._show_chibi()
                 elif kind == 'books':
                     game, xl, _names = val
                     if game == self.game.get() and os.path.isdir(xl):
@@ -869,6 +900,12 @@ class App(tk.Tk):
         self._remember_pc(done, total)
         self.set_status(f'Готово. Перекладено {done} з {total} рядків.')
         self.say(f'\nФайли для перекладу тут:\n{xl}', 'ok')
+        try:
+            import chibi
+            if chibi.ensure(g, self.dirs()[3], self.root_dir(), self.step_nc):
+                self.q.put(('chibi', g))
+        except Exception as ex:
+            self.say(f'  (картинки для журналу не вдалося витягти: {ex})', 'dim')
 
     def do_import(self):
         import sheets
@@ -890,10 +927,11 @@ class App(tk.Tk):
                  f'перекладено: {st["translated"]}', 'dim')
         if not st['translated']:
             raise RuntimeError('У книгах немає жодного перекладу — нема чого заливати.')
-        warn = sheets.validate(work)
+        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl)), xl)
         if warn:
-            self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок у книзі)', 'warn')
-            self._say_warnings(warn, 10)
+            self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок у книзі, '
+                     'правий клік — затвердити)', 'warn')
+        self._say_warnings(warn, 10, hidden)
         self.say('\nЗбираю файли гри…')
         self.set_status('Перепаковую…')
         shutil.rmtree(out, ignore_errors=True)
@@ -1041,21 +1079,71 @@ class App(tk.Tk):
         self._remember_pc(done, total)
         self.say(f'\nПерекладено {done} з {total} рядків '
                  f'({100 * done / total if total else 0:.1f}%).', 'head')
-        warn = sheets.validate(work)
+        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl)), xl)
         if not warn:
             self.say('Попереджень немає — усе чисто.', 'ok')
         else:
-            self.say(f'Попереджень: {len(warn)} (клік по рядку — відкрити його в книзі)', 'warn')
-            self._say_warnings(warn, 200)
+            self.say(f'Попереджень: {len(warn)} (клік — відкрити рядок у книзі, '
+                     'правий клік — затвердити: це не помилка)', 'warn')
+        self._say_warnings(warn, 200, hidden)
         self.set_status(f'Перекладено {done}/{total}.')
 
-    def _say_warnings(self, warn, limit):
+    def _say_warnings(self, warn, limit, hidden=(), approved=False):
         import sheets
         src = getattr(sheets.validate, 'src', {})
+        tr = getattr(sheets.validate, 'tr', {})
         for s, i, w in warn[:limit]:
-            self.say_link(f'  {s} [{i}] — {w}', (s, i, src.get((s, i))))
+            self.say_link(f'  {s} [{i}] — {w}',
+                          (s, i, src.get((s, i)), w, tr.get((s, i), ''), approved),
+                          'dim' if approved else 'warn')
         if len(warn) > limit:
             self.say(f'  …і ще {len(warn) - limit}', 'warn')
+        if hidden:
+            self._hidden = list(hidden)
+            self.q.put(('act', (f'  Затверджено й приховано: {len(hidden)} — показати', 'dim',
+                                self._show_hidden)))
+
+    def _show_hidden(self):
+        hidden = getattr(self, '_hidden', [])
+        self.say('\nЗатверджені попередження (правий клік — скасувати затвердження):', 'dim')
+        self._say_warnings(hidden, 500, approved=True)
+
+    def _link_menu(self, event, name):
+        """Правий клік по попередженню: відкрити рядок / затвердити / скасувати."""
+        game, s, i, src, msg, tr, approved = self.links[name]
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label='Відкрити рядок у книзі', command=lambda: self._goto((game, s, i, src)))
+        if approved:
+            m.add_command(label='Скасувати затвердження',
+                          command=lambda: self._approve(name, False))
+        else:
+            m.add_command(label='Затвердити: це не помилка',
+                          command=lambda: self._approve(name, True))
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
+
+    def _approve(self, name, on):
+        import sheets
+        game, s, i, src, msg, tr, approved = self.links[name]
+        xl = os.path.join(XLSX, GAMES[game]['folder'])
+        ok = sheets.load_approved(xl)
+        key = sheets.approval_key(s, i, msg)
+        if on:
+            ok[key] = tr
+        else:
+            ok.pop(key, None)
+        try:
+            sheets.save_approved(xl, ok)
+        except OSError as ex:
+            self.set_status(f'Не вдалося зберегти: {ex}')
+            return
+        self.links[name] = (game, s, i, src, msg, tr, on)
+        # закреслене — рядок уже не в тому списку, у якому його показано
+        self.log.tag_configure(name, overstrike=on != self.links_shown.get(name, approved))
+        self.set_status('Затверджено: це попередження більше не показуватиметься, доки не зміниш переклад.'
+                        if on else 'Затвердження скасовано.')
 
     def _goto(self, target):
         """Клік по попередженню: відкрити книгу на рядку з цим перекладом."""
@@ -1161,6 +1249,17 @@ class App(tk.Tk):
                                 'Спочатку натисни «1. Дістати текст з гри».')
             return
         self._open_path(os.path.join(xl, name))
+
+    def open_terms(self):
+        """Глосарій гри й «як уже перекладено в книгах» (terms_window.py)."""
+        self._snap()
+        try:
+            import importlib, terms_window, glossary
+            importlib.reload(glossary)
+            importlib.reload(terms_window)
+            terms_window.TermsWindow(self)
+        except Exception as e:
+            messagebox.showerror('Терміни', str(e))
 
     def open_pics(self):
         """Вікно перекладу написів на картинках з живим прев'ю."""

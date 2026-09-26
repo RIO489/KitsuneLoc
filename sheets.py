@@ -55,14 +55,20 @@ COL_PIC = 'Як виглядає'
 PIC_H = 32                           # мінімальна висота рядка з картинкою, пункти
 
 
-def columns(game, has_ja=None, has_pic=False):
+COL_TERMS = 'Терміни'                # з глосарію (glossary.py): які терміни є в рядку
+
+
+def columns(game, has_ja=None, has_pic=False, has_terms=False):
     cols = [(COL_SRC, 0), (COL_ID, 0), (COL_STATE, 17), ('Сцена', 16), ('Хто / ключ', 16),
             ('Оригінал (EN)', 55)]
     if has_pic:
         cols.append((COL_PIC, 38))
     if has_ja if has_ja is not None else game == 'crystar':
         cols.append(('Японська', 45))
-    cols += [(COL_TR, 60), (COL_NOTE, 24), (COL_HINT, 34), (COL_AUTO, 0)]
+    cols.append((COL_TR, 60))
+    if has_terms:
+        cols.append((COL_TERMS, 30))
+    cols += [(COL_NOTE, 24), (COL_HINT, 34), (COL_AUTO, 0)]
     return cols
 
 
@@ -272,10 +278,13 @@ def _sheet(wb, title, cols, first=False):
     return ws
 
 
-def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, has_ja=None):
+def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, has_ja=None,
+               terms=None):
     """Одна книга. `names_only` — {ім'я: (переклад, японською)}: тоді це книга «Імена»."""
     has_pic = any(e.get('preview') for _s, es in book for e in es)
-    cols = columns(game, has_ja, has_pic)
+    import glossary
+    has_terms = bool(terms) and names_only is None
+    cols = columns(game, has_ja, has_pic, has_terms)
     with_ja = any(c == 'Японська' for c, _w in cols)
     L = {c: get_column_letter(k + 1) for k, (c, _w) in enumerate(cols)}
     idx = {c: k for k, (c, _w) in enumerate(cols)}
@@ -290,7 +299,7 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
                 if e.get('tr'):
                     memory.setdefault(e['src'], e['tr'])
 
-    WRAP_COLS = [idx[c] for c in ('Оригінал (EN)', COL_TR, COL_NOTE, COL_HINT) if c in idx]
+    WRAP_COLS = [idx[c] for c in ('Оригінал (EN)', COL_TR, COL_TERMS, COL_NOTE, COL_HINT) if c in idx]
     if 'Японська' in idx:
         WRAP_COLS.append(idx['Японська'])
     rowno = {}                      # свій лічильник: ws.max_row перебирає всі клітинки
@@ -313,7 +322,10 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
             row.append('')                  # картинку кладемо окремо, поверх клітинки
         if with_ja:
             row.append(ja)
-        row += [tr, e.get('note', ''), hint, auto]
+        row.append(tr)
+        if has_terms:
+            row.append(glossary.hint(src, terms))
+        row += [e.get('note', ''), hint, auto]
         target.append(row)
         rowno[id(target)] = r
         # не target[r]: openpyxl тоді щоразу шукає max_column перебором УСІХ
@@ -398,7 +410,10 @@ def export(work_dir, xlsx_dir, game, autofill=True, progress=None):
         sigs = json.load(open(sigs_path, encoding='utf-8'))
     except (OSError, ValueError):
         sigs = {}
-    base = _code_sig() + (json.dumps(tagdict, sort_keys=True, ensure_ascii=False) if tagdict else '')
+    import glossary
+    terms = glossary.load(xlsx_dir)
+    base = (_code_sig() + (json.dumps(tagdict, sort_keys=True, ensure_ascii=False) if tagdict else '')
+            + json.dumps(terms, sort_keys=True, ensure_ascii=False))
     unchanged = []
 
     def safe(path, *args, **kw):
@@ -427,7 +442,7 @@ def export(work_dir, xlsx_dir, game, autofill=True, progress=None):
         path = os.path.join(xlsx_dir, f'{name}.xlsx')
         # колонка «Японська» лише там, де японський текст справді є (в інтерфейсі MSK його немає)
         book_ja = game == 'crystar' or any('ja' in e for _s, es in book for e in es)
-        made.append((path, safe(path, game, book, autofill, tagdict, has_ja=book_ja) or 0))
+        made.append((path, safe(path, game, book, autofill, tagdict, has_ja=book_ja, terms=terms) or 0))
         if progress:
             progress(i + 1, len(books), name)
     prune_stale(xlsx_dir, [p for p, _n in made])
@@ -678,9 +693,13 @@ def _backup_of(work_dir):
     return os.path.join(os.path.dirname(os.path.dirname(w)), 'backup', os.path.basename(w))
 
 
-def validate(work_dir, backup_dir=None):
+def validate(work_dir, backup_dir=None, terms=None):
+    """[(source, id, попередження)]; terms — глосарій (glossary.load), щоб ловити
+    рядки, де термін в оригіналі є, а його перекладу немає."""
+    import glossary
     warn = []
     validate.src = {}                       # (source, id) -> оригінал: для переходу до рядка
+    validate.tr = {}                        # (source, id) -> переклад: для «Затверджено»
     files = collect(work_dir)
     tagdict = tags.build_dict(files) if any(s.startswith('parameter/') for s, _ in files) else None
     docs = [d for d in (locfile.load_json(p) for p in sorted(locfile.walk(work_dir))) if d]
@@ -712,6 +731,9 @@ def validate(work_dir, backup_dir=None):
                 continue
             src = e['src']
             validate.src[(doc['source'], e['id'])] = src
+            validate.tr[(doc['source'], e['id'])] = tr
+            for en, ua in glossary.missing(src, tr, terms or []):
+                warn.append((doc['source'], e['id'], f'термін «{en}» → «{ua}»: у перекладі не знайдено'))
             g = _width_group(doc, e)
             n_src, n_tr = _nlines(src), _nlines(tr)
             if g is not None and (g == ('діалог',) or gcount.get(g, 0) >= 5):
@@ -792,6 +814,45 @@ def validate(work_dir, backup_dir=None):
                     warn.append((doc['source'], e['id'],
                                  f"літер немає в кодуванні гри: {' '.join(bad)}"))
     return warn
+
+
+# ------------------------------------------------------------ «Затверджено»
+APPROVED = '_затверджено.json'      # у теці книг гри: рішення перекладача, як і самі книги
+
+
+def approval_key(source, eid, msg):
+    """Ключ попередження без чисел (ширина в px тощо може трохи змінитись)."""
+    return f'{source}\t{eid}\t' + re.sub(r'\d+(?:\.\d+)?', '#', msg)
+
+
+def load_approved(xlsx_dir):
+    """{ключ попередження: переклад, для якого його затвердили}."""
+    try:
+        with open(os.path.join(xlsx_dir, APPROVED), encoding='utf-8') as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_approved(xlsx_dir, approved):
+    os.makedirs(xlsx_dir, exist_ok=True)
+    p = os.path.join(xlsx_dir, APPROVED)
+    with open(p + '.tmp', 'w', encoding='utf-8') as f:
+        json.dump(approved, f, ensure_ascii=False, indent=1)
+    os.replace(p + '.tmp', p)
+
+
+def split_approved(warn, xlsx_dir):
+    """(показати, затверджені) — затвердження діє, доки переклад рядка той самий."""
+    ok = load_approved(xlsx_dir)
+    tr = getattr(validate, 'tr', {})
+    shown, hidden = [], []
+    for w in warn:
+        s, i, m = w
+        k = approval_key(s, i, m)
+        (hidden if k in ok and ok[k] == tr.get((s, i)) else shown).append(w)
+    return shown, hidden
 
 
 def _sjis_ok(c):
