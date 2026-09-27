@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.9.1'
+VERSION = '1.10'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -294,6 +294,8 @@ class App(tk.Tk):
         self.b_pics.pack(side='left', padx=8)
         self.b_terms = ttk.Button(bk, text='Терміни…', command=self.open_terms)
         self.b_terms.pack(side='left')
+        self.b_scan = ttk.Button(bk, text='Знайти написи…', command=self.open_scan)
+        self.b_scan.pack(side='left', padx=8)
 
         # --- додатково ---------------------------------------------------
         ef = ttk.LabelFrame(self, text=' Додатково ')
@@ -318,7 +320,7 @@ class App(tk.Tk):
 
         self.buttons = [self.b1, self.b2, self.b3, self.b_open, self.b_book, self.b_pics, self.b_editor,
                         self.b_prog, self.b_check, self.b_rest,
-                        self.b_find, self.b_pick]
+                        self.b_find, self.b_pick, self.b_scan]
 
         # --- стан --------------------------------------------------------
         sf = ttk.Frame(self); sf.pack(fill='x', padx=12, pady=(10, 0))
@@ -1470,6 +1472,33 @@ class App(tk.Tk):
             atlas_editor.Editor(self)
         except Exception as e:
             messagebox.showerror('Написи на картинках', str(e))
+
+    def open_scan(self):
+        """Пошук і розмітка написів на картинках самим перекладачем (textscan_window.py)."""
+        self._snap()
+        if self.cur['game'] not in ('msk', 'nep'):
+            messagebox.showinfo('Немає написів',
+                                'Написи на картинках є в Mary Skelter і Neptunia Re;Birth1.')
+            return
+        try:
+            bad = self.check_originals(fix=False)
+        except RuntimeError:
+            bad = []
+        if bad:
+            messagebox.showwarning(
+                'Немає чистих оригіналів',
+                'Резервні копії гри (' + ', '.join(bad) + ') — не оригінали: на картинках уже '
+                'намальований переклад. Закрий гру, у Steam зроби «Перевірити цілісність файлів '
+                'гри» і натисни «1. Дістати текст з гри». Потім відкрий це вікно знову.')
+            return
+        try:
+            self._fresh()
+            import importlib, textscan, textscan_window
+            importlib.reload(textscan)
+            importlib.reload(textscan_window)
+            textscan_window.TextScan(self)
+        except Exception as e:
+            messagebox.showerror('Знайти написи', f'{e}\n\n{traceback.format_exc()}')
 
     def launch(self):
         self._snap()

@@ -23,10 +23,8 @@ MARKS = 'нептун.json'
 
 
 def load_marks():
-    import os
-    if not os.path.exists(os.path.join(atl.DIR, MARKS)):
-        return {}
-    return {k: v for k, v in atl.load_json(MARKS).items() if not k.startswith('_')}
+    """Основна розмітка разом із розміткою перекладача (нептун.мої.json)."""
+    return atl.load_marks(MARKS)
 
 
 def split_src(src):

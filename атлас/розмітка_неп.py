@@ -8,6 +8,7 @@
          «рядки» — по світлому тексту на плашці)
   python атлас/розмітка_неп.py перевірка [src…]                 аркуш: оригінал|стерто|EN|UA
   python атлас/розмітка_неп.py контроль                         межі областей (має бути 0)
+  python атлас/розмітка_неп.py злити                            розмітку перекладача (нептун.мої.json) — в основну
 
 <src> = data/GAME00000.pac/menu/item/title.tid. Текстури читаються з чистих
 оригіналів (backup\\nep, інакше тека гри).
@@ -246,6 +247,13 @@ def main():
         cmd_check(rest)
     elif cmd == 'контроль':
         cmd_audit()
+    elif cmd == 'злити':
+        # розмітку перекладача (нептун.мої.json) — в основну
+        merged, n = atl.fold_user_marks(natl.MARKS)
+        save_marks(merged)
+        atl.save_user(natl.MARKS, {k: v for k, v in atl.load_user(natl.MARKS).items()
+                                   if k.startswith('_')})
+        print(f'забрано в основну розмітку кадрів: {n}')
     else:
         print(__doc__)
 

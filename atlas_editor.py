@@ -17,6 +17,7 @@ from maryskelter import atlas as atl, dds
 from maryskelter.bra import Bra
 
 BOOKS = {'msk': '24 Написи на картинках.xlsx', 'nep': '22 Написи на картинках.xlsx'}
+MARKS = {'msk': 'написи.json', 'nep': 'нептун.json'}      # розмітка в атлас/ (+ «.мої.json»)
 SHEET = 'Текст'
 BG = (32, 32, 40, 255)
 MAX_W = 380             # ширина прев'ю в пікселях екрана
@@ -155,8 +156,7 @@ class Editor(tk.Toplevel):
             self.marks = natl.load_marks()
             self.atlases = NepTextures(bk, app.root_dir())
         else:
-            self.marks = {k: v for k, v in atl.load_json('написи.json').items()
-                          if not k.startswith('_')}
+            self.marks = atl.load_marks('написи.json')
             self.atlases = Atlases(bk, app.root_dir())
         self.styles = atl.load_json('стилі.json')
         self.rows = self._read_book()           # [{id, src, tr, where}]
@@ -745,13 +745,15 @@ class Editor(tk.Toplevel):
         self._schedule(0)
 
     def _markup(self):
-        """(модуль інструмента розмітки, уся розмітка з диска)."""
-        import importlib.util
-        tool = 'розмітка_неп.py' if self.game == 'nep' else 'розмітка.py'
-        sp = importlib.util.spec_from_file_location('_tool', os.path.join(atl.DIR, tool))
-        mod = importlib.util.module_from_spec(sp)
-        sp.loader.exec_module(mod)
-        return mod, mod.load_marks()
+        """(куди писати, уся розмітка): основна + перекладача; пишемо лише в «мої»
+        (атлас/написи.мої.json чи нептун.мої.json) — основну веде власник програми."""
+        name = MARKS[self.game]
+
+        class Saver:
+            @staticmethod
+            def save_marks(marks):
+                atl.save_user_marks(name, marks)
+        return Saver, atl.load_marks(name)
 
     def _apply_look(self):
         """Записати вибраний шрифт і «справжні літери» в розмітку для всіх

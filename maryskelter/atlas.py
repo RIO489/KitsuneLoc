@@ -59,6 +59,93 @@ def load_json(name):
         return json.load(f)
 
 
+# ------------------------------------------------------------ розмітка перекладача
+# Основна розмітка (написи.json, нептун.json) — у git, її веде власник програми.
+# Те, що розмітив сам перекладач (вікна «Написи на картинках» і «Знайти написи»),
+# лежить поруч у «<назва>.мої.json» (не в git: git pull ніколи не конфліктує) і
+# накладається зверху кадр за кадром. Власник забирає це в основну — fold_user_marks.
+# Службові ключі файлу перекладача: "_відхилено" — {джерело: [[x0, y0, x1, y1], ...]}
+# (що в пошуку позначено «не текст»).
+def user_file(name):
+    return name[:-5] + '.мої.json' if name.endswith('.json') else name + '.мої'
+
+
+def _read(name):
+    p = os.path.join(DIR, name)
+    if not os.path.exists(p):
+        return {}
+    with open(p, encoding='utf-8') as f:
+        return json.load(f)
+
+
+def load_user(name):
+    """Уся розмітка перекладача, разом зі службовими ключами."""
+    return _read(user_file(name))
+
+
+def load_marks(name, user=True):
+    """{джерело: розмітка} без службових ключів; user — з правками перекладача."""
+    import copy
+    marks = {k: v for k, v in _read(name).items() if not k.startswith('_')}
+    if not user:
+        return marks
+    for src, mk in load_user(name).items():
+        if src.startswith('_'):
+            continue
+        if src not in marks:
+            marks[src] = copy.deepcopy(mk)
+            continue
+        base = marks[src] = copy.deepcopy(marks[src])
+        for k, v in mk.items():
+            if k != 'кадри':
+                base[k] = v
+        base.setdefault('кадри', {}).update(copy.deepcopy(mk.get('кадри', {})))
+    return marks
+
+
+def save_user_marks(name, marks):
+    """Записати в «мої» лише те, чим `marks` відрізняється від основної розмітки
+    (нові атласи, нові й змінені кадри). Службові ключі перекладача зберігаються."""
+    base = load_marks(name, user=False)
+    old = load_user(name)
+    out = {k: v for k, v in old.items() if k.startswith('_')}
+    for src, mk in marks.items():
+        if src.startswith('_'):
+            continue
+        b = base.get(src)
+        if b is None:
+            out[src] = mk
+            continue
+        fr = {i: s for i, s in mk.get('кадри', {}).items() if b.get('кадри', {}).get(i) != s}
+        head = {k: v for k, v in mk.items() if k != 'кадри' and b.get(k) != v}
+        if fr or head:
+            out[src] = dict(head, кадри=fr)
+    save_user(name, out)
+
+
+def save_user(name, data):
+    """Файл перекладача цілком (порожній — прибрати)."""
+    p = os.path.join(DIR, user_file(name))
+    if not any(data.values()):
+        if os.path.exists(p):
+            os.remove(p)
+        return
+    with open(p + '.tmp', 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    os.replace(p + '.tmp', p)
+
+
+def fold_user_marks(name):
+    """Для власника: розмітку перекладача — в основну; повертає, скільки кадрів забрано.
+    Службові ключі ("_відхилено") лишаються у «мої»."""
+    user = load_user(name)
+    merged = load_marks(name)
+    n = sum(len(v.get('кадри', {})) for k, v in user.items() if not k.startswith('_'))
+    base_all = _read(name)
+    base_all.update(merged)
+    return base_all, n
+
+
 # ------------------------------------------------------------------ шрифти
 _fonts = {}
 EXTRA_FONT_DIRS = {}    # шрифт -> тека (бібліотека кандидатів, див. fontlib.py)

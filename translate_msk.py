@@ -630,10 +630,9 @@ def _import_dlc(a, progress=None, extra=None):
 
 
 def _atlas_marks():
-    """Розмітка написів на картинках: {'TTM3.bra/TEXTURE/…/x.CL3': {...}}."""
-    if not os.path.exists(os.path.join(atl.DIR, 'написи.json')):
-        return {}
-    return {k: v for k, v in atl.load_json('написи.json').items() if not k.startswith('_')}
+    """Розмітка написів на картинках: {'TTM3.bra/TEXTURE/…/x.CL3': {...}} — основна
+    разом із розміткою перекладача (написи.мої.json)."""
+    return atl.load_marks('написи.json')
 
 
 def _atlas_path(src):

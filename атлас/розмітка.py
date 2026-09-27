@@ -8,6 +8,8 @@
   python атлас/розмітка.py тло      <джерело> <кадр> <файл.png>   порожній кадр -> атлас/тло/
   python атлас/розмітка.py перевірка [джерело ...]      аркуш: оригінал | стерто |
                                                           наш англійський | український
+  python атлас/розмітка.py злити                         розмітку перекладача (написи.мої.json,
+                                                          надіслав він) — в основну
 
 <джерело> — як у написи.json: TTM3.bra/TEXTURE/title/titlemenu_difficulty.CL3
 Картинки лягають у атлас/_огляд/. Гра береться з settings.json (ключ "msk").
@@ -379,8 +381,19 @@ def main():
         cmd_bg(a[1], a[2], a[3])
     elif a[0] == 'перевірка':
         cmd_check(a[1:])
+    elif a[0] == 'злити':
+        cmd_fold()
     else:
         print(__doc__)
+
+
+def cmd_fold():
+    """Розмітку перекладача (написи.мої.json) — в основну; у «мої» лишаються службові ключі."""
+    merged, n = atl.fold_user_marks('написи.json')
+    save_marks(merged)
+    atl.save_user('написи.json', {k: v for k, v in atl.load_user('написи.json').items()
+                                  if k.startswith('_')})
+    print(f'забрано в основну розмітку кадрів: {n}')
 
 
 if __name__ == '__main__':
