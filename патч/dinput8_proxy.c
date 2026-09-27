@@ -33,12 +33,23 @@
  * як завантажник підтягне наші імпорти. Тому в DllMain патчити рано: там ще
  * шифротекст. Замість цього піднімаємо потік, який чекає на появу сигнатур.
  *
+ * Рядки ПК-порту (v3)
+ * -------------------
+ * Частина тексту (налаштування керування й екрана, діалоги збережень, назви дій)
+ * зашита в .rdata exe, і українська (UTF-8, удвічі довша) на місце не влазить.
+ * Програма перекладу кладе поруч ua_strings.bin: пари «англійський рядок →
+ * переклад». Після розшифрування коду знаходимо кожен англійський рядок у .rdata
+ * (за текстом, тож адреси з нової збірки не страшні), кладемо переклад у свою
+ * пам'ять і переставляємо на нього всі вказівники. Де саме лежать вказівники,
+ * беремо з таблиці релокацій exe (з файлу на диску) — жодних вгадувань.
+ *
  * Збірка: build.bat (MSVC, x86). Готову dinput8.dll покласти поруч з
  * MarySkelter.exe. Знімається видаленням цієї dll.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string.h>
 
@@ -168,6 +179,195 @@ static int TryPatch(void)
     return applied;
 }
 
+/* ================================================= рядки ПК-порту (v3) */
+static char g_dir[MAX_PATH];            /* тека dll (= тека гри), з '\' у кінці */
+
+typedef struct { DWORD from, to; } Swap;
+
+static int SwapCmp(const void *a, const void *b)
+{
+    DWORD x = ((const Swap *)a)->from, y = ((const Swap *)b)->from;
+    return x < y ? -1 : x > y;
+}
+
+static BYTE *ReadWhole(const char *path, DWORD *size)
+{
+    HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    BYTE *buf = NULL;
+    DWORD got = 0;
+    if (f == INVALID_HANDLE_VALUE) return NULL;
+    *size = GetFileSize(f, NULL);
+    if (*size != INVALID_FILE_SIZE && *size > 0) {
+        buf = (BYTE *)HeapAlloc(GetProcessHeap(), 0, *size);
+        if (buf && (!ReadFile(f, buf, *size, &got, NULL) || got != *size)) {
+            HeapFree(GetProcessHeap(), 0, buf);
+            buf = NULL;
+        }
+    }
+    CloseHandle(f);
+    return buf;
+}
+
+/* Секція образу exe в пам'яті за назвою. */
+static BYTE *FindSection(const char *name, DWORD *size)
+{
+    BYTE *base = (BYTE *)GetModuleHandle(NULL);
+    DWORD elf = *(DWORD *)(base + 0x3C);
+    WORD  ns  = *(WORD *)(base + elf + 6);
+    WORD  os  = *(WORD *)(base + elf + 4 + 16);
+    BYTE *sec = base + elf + 4 + 20 + os;
+    WORD  s;
+    for (s = 0; s < ns; s++) {
+        if (strncmp((char *)sec + s * 40, name, 8) == 0) {
+            *size = *(DWORD *)(sec + s * 40 + 8);
+            return base + *(DWORD *)(sec + s * 40 + 12);
+        }
+    }
+    return NULL;
+}
+
+/* Таблиця релокацій з файлу exe: [RVA слота з абсолютною адресою]. */
+static DWORD *ReadRelocs(DWORD *count)
+{
+    char exe[MAX_PATH];
+    DWORD fsize = 0, n = 0, cap = 0, i;
+    BYTE *f, *sec, *p, *end;
+    DWORD pe, rva = 0, rsize = 0, raw = 0;
+    WORD ns, os, s;
+    DWORD *out = NULL;
+
+    *count = 0;
+    GetModuleFileNameA(NULL, exe, MAX_PATH);
+    f = ReadWhole(exe, &fsize);
+    if (!f) return NULL;
+    pe = *(DWORD *)(f + 0x3C);
+    ns = *(WORD *)(f + pe + 6);
+    os = *(WORD *)(f + pe + 20);
+    /* PE32: DataDirectory[5] (base relocation) на +0x60 + 5*8 від optional header */
+    rva   = *(DWORD *)(f + pe + 24 + 0x60 + 5 * 8);
+    rsize = *(DWORD *)(f + pe + 24 + 0x60 + 5 * 8 + 4);
+    sec = f + pe + 24 + os;
+    for (s = 0; s < ns; s++) {
+        DWORD va = *(DWORD *)(sec + s * 40 + 12), vs = *(DWORD *)(sec + s * 40 + 8);
+        if (rva >= va && rva < va + vs) raw = rva - va + *(DWORD *)(sec + s * 40 + 20);
+    }
+    if (!rva || !raw || raw + rsize > fsize) { HeapFree(GetProcessHeap(), 0, f); return NULL; }
+    p = f + raw;
+    end = p + rsize;
+    while (p + 8 <= end) {
+        DWORD page = *(DWORD *)p, bsize = *(DWORD *)(p + 4);
+        if (bsize < 8 || p + bsize > end) break;
+        for (i = 8; i + 2 <= bsize; i += 2) {
+            WORD e = *(WORD *)(p + i);
+            if ((e >> 12) != 3) continue;           /* IMAGE_REL_BASED_HIGHLOW */
+            if (n == cap) {
+                DWORD *nw;
+                cap = cap ? cap * 2 : 4096;
+                nw = out ? (DWORD *)HeapReAlloc(GetProcessHeap(), 0, out, cap * 4)
+                         : (DWORD *)HeapAlloc(GetProcessHeap(), 0, cap * 4);
+                if (!nw) { n = 0; break; }
+                out = nw;
+            }
+            out[n++] = page + (e & 0xFFF);
+        }
+        p += bsize;
+    }
+    HeapFree(GetProcessHeap(), 0, f);
+    *count = n;
+    return out;
+}
+
+/* Підготовлена підміна: {адреса англ. рядка -> адреса перекладу} і слоти релокацій. */
+static Swap  *g_sw = NULL;
+static DWORD  g_nswap = 0;
+static DWORD *g_rel = NULL;
+static DWORD  g_nrel = 0;
+
+/* ua_strings.bin: 'UAS1', u32 к-сть, далі {u16 довж., англ. байти, u16 довж., переклад}. */
+static void PrepareStrings(void)
+{
+    char path[MAX_PATH];
+    DWORD size = 0, cnt, k, rsz = 0, i, strs = 0;
+    BYTE *buf, *p, *end, *rdata;
+
+    lstrcpyA(path, g_dir);
+    lstrcatA(path, "ua_strings.bin");
+    buf = ReadWhole(path, &size);
+    if (!buf) { Log("Рядки: ua_strings.bin немає — пропускаю\n"); return; }
+    if (size < 8 || memcmp(buf, "UAS1", 4) != 0) {
+        Log("Рядки: ua_strings.bin не того формату\n");
+        return;
+    }
+    cnt = *(DWORD *)(buf + 4);
+    rdata = FindSection(".rdata", &rsz);
+    if (!rdata || !cnt) { Log("Рядки: немає .rdata або записів (%lu)\n", cnt); return; }
+    g_sw = (Swap *)HeapAlloc(GetProcessHeap(), 0, (cnt * 4 + 16) * sizeof(Swap));
+    if (!g_sw) return;
+
+    p = buf + 8;
+    end = buf + size;
+    for (k = 0; k < cnt && p + 2 <= end; k++) {
+        WORD le = *(WORD *)p, lu;
+        BYTE *en = p + 2, *ua, *copy;
+        int found = 0;
+        if (en + le + 2 > end) break;
+        lu = *(WORD *)(en + le);
+        ua = en + le + 2;
+        if (ua + lu > end) break;
+        p = ua + lu;
+        copy = (BYTE *)HeapAlloc(GetProcessHeap(), 0, lu + 1);
+        if (!copy) continue;
+        memcpy(copy, ua, lu);
+        copy[lu] = 0;
+        /* кожне входження «\0рядок\0» у .rdata (рядки там вирівняні, тож перед ним нуль) */
+        for (i = 1; i + le + 1 < rsz; i++) {
+            if (rdata[i] != en[0] || rdata[i - 1] != 0 || rdata[i + le] != 0) continue;
+            if (memcmp(rdata + i, en, le) != 0) continue;
+            if (g_nswap < cnt * 4 + 16) {
+                g_sw[g_nswap].from = (DWORD)(rdata + i);
+                g_sw[g_nswap].to = (DWORD)copy;
+                g_nswap++;
+                found++;
+            }
+        }
+        if (found) strs++;
+        else Log("  не знайдено: %.60s\n", (char *)en);
+    }
+    HeapFree(GetProcessHeap(), 0, buf);
+    if (!g_nswap) { Log("Рядки: жодного збігу\n"); return; }
+    qsort(g_sw, g_nswap, sizeof(Swap), SwapCmp);
+    g_rel = ReadRelocs(&g_nrel);
+    if (!g_rel) { Log("Рядки: не прочитав таблицю релокацій exe — пропускаю\n"); g_nswap = 0; return; }
+    Log("Рядки: знайдено %lu з %lu, слотів релокацій %lu\n", strs, cnt, g_nrel);
+}
+
+/* Переставити вказівники: in_text=0 — усе поза .text (дані не зашифровані, можна
+   одразу, ще до першого рядка коду гри); in_text=1 — у коді, після розшифрування. */
+static void PatchSlots(int in_text)
+{
+    BYTE *base = (BYTE *)GetModuleHandle(NULL);
+    DWORD i, slots = 0;
+    if (!g_nswap || !g_rel) return;
+    for (i = 0; i < g_nrel; i++) {
+        BYTE *at = base + g_rel[i];
+        DWORD *slot = (DWORD *)at;
+        int text = g_text && at >= g_text && at < g_text + g_textSize;
+        Swap key, *hit;
+        DWORD old;
+        if (text != in_text) continue;
+        key.from = *slot;
+        hit = (Swap *)bsearch(&key, g_sw, g_nswap, sizeof(Swap), SwapCmp);
+        if (!hit) continue;
+        if (VirtualProtect(slot, 4, PAGE_EXECUTE_READWRITE, &old)) {
+            *slot = hit->to;
+            VirtualProtect(slot, 4, old, &old);
+            slots++;
+        }
+    }
+    if (in_text) FlushInstructionCache(GetCurrentProcess(), g_text, g_textSize);
+    Log("Рядки: вказівників %s переставлено %lu\n", in_text ? "у коді" : "у даних", slots);
+}
+
 /*
  * Чекаємо, поки Steam-стаб розшифрує .text. До того там шифротекст і
  * сигнатури не знайдуться. Пробуємо 60 секунд, далі здаємось тихо —
@@ -179,17 +379,25 @@ static DWORD WINAPI PatchThread(LPVOID param)
     int total = 0;
 
     (void)param;
-    FindText();
-    Log(".text: 0x%08X, розмір 0x%X\n", (unsigned)g_text, g_textSize);
 
-    for (tries = 0; tries < 600; tries++) {
-        total += TryPatch();
-        if (total >= (int)NPATCH) {
-            Log("Готово: %d/%d патчів, спроба %d\n", total, (int)NPATCH, tries + 1);
-            if (logFile) { fclose(logFile); logFile = NULL; }
-            return 0;
+    {
+        int strings_done = 0;
+        for (tries = 0; tries < 12000; tries++) {      /* 60 с по 5 мс */
+            total += TryPatch();
+            /* знайдена сигнатура = код розшифровано: час підміняти рядки, поки гра
+               не встигла скопіювати вказівники на них */
+            if (total > 0 && !strings_done) {
+                PatchSlots(1);
+                strings_done = 1;
+            }
+            if (total >= (int)NPATCH) {
+                Log("Готово: %d/%d патчів, спроба %d\n", total, (int)NPATCH, tries + 1);
+                if (logFile) { fclose(logFile); logFile = NULL; }
+                return 0;
+            }
+            Sleep(5);
         }
-        Sleep(100);
+        if (!strings_done) PatchSlots(1);
     }
 
     Log("Час вийшов: застосовано %d з %d. Код або не розшифровано, "
@@ -214,11 +422,12 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         GetModuleFileNameA(hModule, dllDir, MAX_PATH);
         slash = strrchr(dllDir, '\\');
         if (slash) *(slash + 1) = '\0';
+        lstrcpyA(g_dir, dllDir);
         lstrcpyA(logPath, dllDir);
         lstrcatA(logPath, "ua_patch_log.txt");
         logFile = fopen(logPath, "w");
 
-        Log("=== Mary Skelter UA: патч відступів, v2 ===\n");
+        Log("=== Mary Skelter UA: патч відступів і рядків, v3 ===\n");
 
         GetSystemDirectoryA(sysDir, MAX_PATH);
         lstrcatA(sysDir, "\\dinput8.dll");
@@ -233,6 +442,13 @@ BOOL WINAPI DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         } else {
             Log("НЕ вдалося завантажити системну dinput8 (err=%lu)\n", GetLastError());
         }
+
+        /* дані не зашифровані: вказівники на рядки в .data/.rdata переставляємо тут,
+           до того як стаб Steam передасть керування коду гри */
+        FindText();
+        Log(".text: 0x%08X, розмір 0x%X\n", (unsigned)g_text, g_textSize);
+        PrepareStrings();
+        PatchSlots(0);
 
         th = CreateThread(NULL, 0, PatchThread, NULL, 0, NULL);
         if (th) CloseHandle(th);

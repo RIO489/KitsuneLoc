@@ -39,6 +39,21 @@ TABLE_FILE = 'data\\table.enc'      # спорядження, навички, з
 TABLE_ENC = 'utf-8'                 # кодування рядків у таблицях
 FONT_ARC = 'System.bra'           # шрифти: window\\font\\*.ffu
 DLC_ARC = 'DLC.bra'                 # описи DLC: DLCINFO/*.enc, той самий контейнер
+# Game.bra/StringData — здебільшого залишки Monster Monpiece (японською, гра їх не
+# показує), але екран збережень ПК-порту бере звідси два англійські рядки
+GAME_ARC = 'Game.bra'
+GAME_STR = 'StringData\\strSystem.gstr'
+GAME_IDS = ('IDS_SAVEDATA_TITLE', 'IDS_SAVEDATA_PLAY_TIME')
+GAME_SIG = '_game_bra.json'         # що вже залито в Game.bra (760 МБ — не перепаковувати даремно)
+# рядки самого ПК-порту зашиті в .rdata exe (діалоги збережень, налаштування керування й
+# екрана, назви дій); переклад кладемо поруч у EXE_STRINGS, а патч/dinput8.dll у пам'яті
+# переставляє вказівники на нього. Ділянки — від рядка до рядка (за текстом, не адресою)
+EXE_NAME = 'MarySkelter.exe'
+EXE_STRINGS = 'ua_strings.bin'
+EXE_DLL = 'dinput8.dll'
+EXE_BLOCKS = (('Return to Windows Desktop. Unsaved data will be lost.', 'No'),
+              ('Close Controls Screen', 'Close Controls Screen'),
+              ('Menu Up', 'Strafe Right'))
 ATLAS_SRC = '@атлас/написи'         # написи на картинках: один документ на всі атласи
 NL = '#n'                                                     # перенос рядка в інтерфейсі
 TWIN_PREFIX = '_EN\\'
@@ -132,35 +147,18 @@ def _jp_textdata(en, jp):
 
 
 def _jp_table(de, dj):
-    """{зсув: японський} для секції .enc: поля в обох версіях за тими самими зсувами.
-    Слот-продовження (після переносу чи не-ASCII символу в англійському) пропускаємо —
-    японський текст поля дістається першому слоту цілком."""
+    """{зсув слота: японський} для секції .enc: поля в обох версіях за тими самими
+    зсувами, японський читаємо з початку поля (tbl.fields)."""
     out = {}
-    for off, t, _cap in tbl.slots(de, TABLE_ENC):
-        if off and _continues(de, off):
-            continue
-        end = dj.find(b'\0', off)
+    for off, start, t, _cap in tbl.fields(de, TABLE_ENC):
+        end = dj.find(b'\0', start)
         try:
-            s = dj[off:end].decode('utf-8')
+            s = dj[start:end].decode('utf-8')
         except UnicodeDecodeError:
             continue
         if s and s != t and not s.isascii():
             out[str(off)] = s
     return out
-
-
-def _continues(d, off):
-    """Чи продовжує байт перед `off` текст того самого рядка."""
-    c = d[off - 1]
-    if c == 10 or 0x20 <= c < 0x7f:
-        return True
-    for n in (2, 3, 4):
-        try:
-            if len(d[max(0, off - n):off].decode('utf-8')) == 1:
-                return True
-        except UnicodeDecodeError:
-            pass
-    return False
 
 
 def _sid(rec, fo):
@@ -207,7 +205,9 @@ def cmd_export(a, progress=None):
         for name in UI_FILES:
             td = TextData(t.read(name))
             strs = td.strings()
-            items = [{'id': str(i), 'src': s_.replace(NL, '\n')}
+            # службових ключів у TextData немає: DREAM, CH.8, POISN — справжні написи,
+            # а евристика sheets.looks_like_key ховала їх у «Службове»
+            items = [{'id': str(i), 'src': s_.replace(NL, '\n'), 'kind': 'text'}
                      for i, s_ in enumerate(strs) if s_]
             source = _source(UI_ARC, name)
             # TextDataEx (налагодження) і в англійській версії японський — пари не треба
@@ -222,6 +222,11 @@ def cmd_export(a, progress=None):
         n_tab = _export_tables(a, t, jp)
         if n_tab:
             print(f'  {UI_ARC}\\{TABLE_FILE}: {n_tab} рядків у таблицях')
+    if _export_game(a):
+        print(f'  {GAME_ARC}: рядки екрана збережень')
+    n_exe = _export_exe(a)
+    if n_exe:
+        print(f'  {EXE_NAME}: рядків ПК-порту {n_exe}')
     jp.save()
     dlc = os.path.join(a.game_dir, DLC_ARC)
     if os.path.exists(dlc):
@@ -295,6 +300,8 @@ def cmd_import(a, progress=None):
     _import_ui(a, progress, pics.pop(UI_ARC, None))
     _import_dlc(a, progress, pics.pop(DLC_ARC, None))
     _import_font(a, progress)
+    _import_game(a, progress, pics.pop(GAME_ARC, None))
+    _import_exe(a)
     for arc_, rp in pics.items():
         print(f'  {arc_}: перепаковую архів текстур…')
         Bra(_orig(a, arc_)).repack(os.path.join(a.out_dir, arc_), rp,
@@ -315,10 +322,17 @@ def _export_enc(a, arc, name, blob, jp=None, jp_blob=None):
         data = e.read(sec)
         source = _source(arc, f'{name}#{sec.index}')
         items = []
-        for off, text, cap in tbl.slots(data, TABLE_ENC):
+        # поле цілком (tbl.fields): раніше опис з переносом чи символом □ давав лише
+        # хвіст, а початок у грі лишався англійським. id — той самий зсув слота, тож
+        # уже зроблений переклад не губиться
+        for off, start, text, cap in tbl.fields(data, TABLE_ENC):
             it = {'id': str(off), 'src': text, 'cap': cap}
             if tbl.is_service(text):
                 it['kind'] = 'key'
+            elif start != off:
+                tail = text[len(data[start:off].decode(TABLE_ENC, 'replace')):]
+                it['hint'] = (f'опис тепер цілим полем, раніше тут був лише кінець («{tail}») — '
+                              'перевір, що переклад охоплює весь текст')
             items.append(it)
         if len(items) < 3:
             continue
@@ -342,7 +356,8 @@ def _import_enc(a, arc, name, blob):
         if not doc:
             continue
         data = e.read(sec)
-        cur = {str(o): (txt, cap) for o, txt, cap in tbl.slots(data, TABLE_ENC)}
+        # пишемо з початку поля (tbl.fields), id рядка — зсув слота
+        cur = {str(o): (txt, cap, st) for o, st, txt, cap in tbl.fields(data, TABLE_ENC)}
         ch = {}
         for x in doc['entries']:
             t_ = x.get('tr')
@@ -351,7 +366,7 @@ def _import_enc(a, arc, name, blob):
             t_ = chars.apply(t_)
             got = cur.get(x['id'])
             if got and t_ != got[0]:
-                ch[int(x['id'])] = (t_, got[1])
+                ch[got[2]] = (t_, got[1])
         if not ch:
             continue
         body, bad = tbl.build(data, ch, TABLE_ENC)
@@ -360,6 +375,146 @@ def _import_enc(a, arc, name, blob):
         new[sec.index] = body
         n += len(ch) - len(bad)
     return (n, warns, e.build(new) if new else None)
+
+
+def _game_strings(g):
+    """{IDS_…: (запис, зсув, текст)} для рядків GAME_IDS у strSystem.gstr."""
+    rows = {}
+    for i, fo, s_ in g.strings():
+        rows.setdefault(i, []).append((fo, s_))
+    out = {}
+    for i, fields in rows.items():
+        if len(fields) >= 2 and fields[0][1] in GAME_IDS:
+            fo, text = fields[1]
+            out[fields[0][1]] = (i, fo, text)
+    return out
+
+
+def _export_game(a):
+    if not os.path.exists(os.path.join(a.game_dir, GAME_ARC)):
+        return 0
+    # рушій MSK усе показує в UTF-8 (шрифт шукає символи за байтами UTF-8), а японські
+    # рядки цього cp932-файлу гра не показує — тож читаємо й пишемо як UTF-8
+    g = Gbnl(Bra.read_some(_orig(a, GAME_ARC), [GAME_STR])[GAME_STR], 'utf-8')
+    items = [{'id': k, 'src': t, 'kind': 'text', 'ctx': k}
+             for k, (_i, _fo, t) in sorted(_game_strings(g).items())]
+    locfile.save_rich(a.work_dir, 'msk', _source(GAME_ARC, GAME_STR), 'gstr', items,
+                      {'encoding': 'utf-8'})
+    return len(items)
+
+
+def _import_game(a, progress=None, extra=None):
+    """Game.bra: рядки екрана збережень + написи на картинках з цього архіву (`extra`,
+    напр. EVENT/parts1.dds — STOP/SKIP/AUTO/LOG у сценах) — одним проходом. Архів
+    великий (760 МБ), тож перепаковуємо, лише коли зміст змінився або в грі не наш файл."""
+    import hashlib
+    in_game = os.path.join(a.game_dir, GAME_ARC)
+    if not os.path.exists(in_game):
+        return
+    src = _orig(a, GAME_ARC)
+    repl = dict(extra or {})
+    doc = locfile.load_doc(a.work_dir, _source(GAME_ARC, GAME_STR))
+    n_str = 0
+    if doc:
+        tr = {x['id']: chars.apply(x['tr']) for x in doc['entries'] if x.get('tr')}
+        g = Gbnl(Bra.read_some(src, [GAME_STR])[GAME_STR], 'utf-8')
+        new = {(i, fo): tr[k] for k, (i, fo, t) in _game_strings(g).items()
+               if tr.get(k) and tr[k] != t}
+        if new:
+            repl[GAME_STR] = g.build(new)
+            n_str = len(new)
+    sig_path = os.path.join(a.work_dir, GAME_SIG)
+    try:
+        with open(sig_path, encoding='utf-8') as f:
+            was = json.load(f)
+    except (OSError, ValueError):
+        was = {}
+    if not repl:
+        if was.get('sig'):
+            # переклад прибрали — повернути в гру оригінал з резервної копії
+            if os.path.abspath(src) != os.path.abspath(in_game):
+                shutil.copy2(src, os.path.join(a.out_dir, GAME_ARC))
+            os.remove(sig_path)
+        return
+    h = hashlib.md5()
+    for name in sorted(repl):
+        h.update(name.encode('utf-8') + b'\0' + hashlib.md5(repl[name]).digest())
+    sig = h.hexdigest()
+    if was.get('sig') == sig and os.path.getsize(in_game) == was.get('size'):
+        print(f'  {GAME_ARC}: без змін — архів не перепаковую')
+        return
+    print(f'  {GAME_ARC}: перепаковую (~760 МБ)…')
+    dst = os.path.join(a.out_dir, GAME_ARC)
+    Bra(src).repack(dst, repl, progress=_packer(progress, GAME_ARC))
+    with open(sig_path, 'w', encoding='utf-8') as f:
+        json.dump({'sig': sig, 'size': os.path.getsize(dst)}, f)
+    print(f'  {GAME_ARC}: рядків екрана збережень {n_str}, картинок {len(repl) - bool(n_str)}')
+
+
+def _exe_strings(exe):
+    """[англійський рядок] з ділянок EXE_BLOCKS у .rdata exe (у байтах, як у файлі)."""
+    import struct
+    pe = struct.unpack_from('<I', exe, 0x3c)[0]
+    ns, osz = struct.unpack_from('<H', exe, pe + 6)[0], struct.unpack_from('<H', exe, pe + 20)[0]
+    rd = b''
+    for k in range(ns):
+        name, _vs, _va, rs, ra = struct.unpack_from('<8sIIII', exe, pe + 24 + osz + 40 * k)
+        if name.rstrip(b'\0') == b'.rdata':
+            rd = exe[ra:ra + rs]
+    out = []
+    for first, last in EXE_BLOCKS:
+        i = rd.find(b'\0' + first.encode() + b'\0')
+        j = rd.find(b'\0' + last.encode() + b'\0', i)
+        if i < 0 or j < 0:
+            print(f'  ! {EXE_NAME}: не знайшов рядків «{first}» … «{last}» (інша версія гри?)')
+            continue
+        for m in re.finditer(rb'(?<=\x00)[\x09\x0a\x20-\x7e]{2,}(?=\x00)', rd[i:j + len(last) + 2]):
+            t = m.group().decode('ascii')
+            if re.search(r'[A-Za-z]', t) and t not in out:
+                out.append(t)
+    return out
+
+
+def _export_exe(a):
+    path = os.path.join(a.game_dir, EXE_NAME)
+    if not os.path.exists(path):
+        return 0
+    with open(path, 'rb') as f:
+        strs = _exe_strings(f.read())
+    items = [{'id': t, 'src': t.replace(NL, '\n'), 'kind': 'text'} for t in strs]
+    locfile.save_rich(a.work_dir, 'msk', EXE_NAME, 'exe', items, {'encoding': 'utf-8', 'newline': NL})
+    return len(items)
+
+
+def _import_exe(a):
+    """Переклад рядків exe -> out/ua_strings.bin (+ свіжий патч/dinput8.dll, якщо в грі
+    старий або його немає: рядки підміняє саме він)."""
+    import hashlib, struct
+    doc = locfile.load_doc(a.work_dir, EXE_NAME)
+    if not doc or not os.path.exists(os.path.join(a.game_dir, EXE_NAME)):
+        return
+    recs = []
+    for x in doc['entries']:
+        tr = x.get('tr')
+        if tr and tr != x['src']:
+            en = x['id'].encode('ascii')
+            ua = chars.apply(tr).replace('\n', NL).encode('utf-8')
+            recs.append(struct.pack('<H', len(en)) + en + struct.pack('<H', len(ua)) + ua)
+    blob = b'UAS1' + struct.pack('<I', len(recs)) + b''.join(recs)
+    in_game = os.path.join(a.game_dir, EXE_STRINGS)
+    if not recs and not os.path.exists(in_game):
+        return
+    old = open(in_game, 'rb').read() if os.path.exists(in_game) else None
+    if blob != old:
+        with open(os.path.join(a.out_dir, EXE_STRINGS), 'wb') as f:
+            f.write(blob)
+    dll = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'патч', EXE_DLL)
+    g_dll = os.path.join(a.game_dir, EXE_DLL)
+    md5 = lambda p: hashlib.md5(open(p, 'rb').read()).hexdigest()
+    if os.path.exists(dll) and (not os.path.exists(g_dll) or md5(dll) != md5(g_dll)):
+        shutil.copy2(dll, os.path.join(a.out_dir, EXE_DLL))
+        print(f'  {EXE_DLL}: нова версія патча (рядки ПК-порту)')
+    print(f'  {EXE_NAME}: рядків ПК-порту {len(recs)}')
 
 
 def _export_tables(a, t, jp=None):
@@ -499,7 +654,6 @@ def _export_atlas(a):
         return 0
     from PIL import Image
     from maryskelter import dds
-    from maryskelter.cl3 import Cl3
     blobs = _read_atlases(a, marks)
     prev = os.path.join(a.work_dir, '_атлас')
     os.makedirs(prev, exist_ok=True)
@@ -520,7 +674,7 @@ def _export_atlas(a):
             print(f'  ! немає атласу {src}')
             continue
         where = mark.get('назва', src)
-        cl3 = Cl3(blobs[src])
+        cl3 = atl.container(blobs[src])
         img, boxes = None, atl.frames(cl3, mark.get('текстура'))
         for i, spec in sorted(mark['кадри'].items(), key=atl.order):
             k = atl.key_of(spec)

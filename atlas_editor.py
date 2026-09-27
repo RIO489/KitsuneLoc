@@ -15,7 +15,6 @@ from PIL import Image, ImageTk
 
 from maryskelter import atlas as atl, dds
 from maryskelter.bra import Bra
-from maryskelter.cl3 import Cl3
 
 BOOKS = {'msk': '24 Написи на картинках.xlsx', 'nep': '22 Написи на картинках.xlsx'}
 SHEET = 'Текст'
@@ -42,7 +41,7 @@ class Atlases:
                              if os.path.exists(os.path.join(d, arc))), None)
                 if path is None:
                     raise FileNotFoundError(arc)
-                cl3 = Cl3(Bra.read_some(path, [name])[name])
+                cl3 = atl.container(Bra.read_some(path, [name])[name])
                 stem = mark.get('текстура')
                 img = dds.decode(bytes(atl.pair(cl3, stem)[1][1]))
                 self.cache[src] = (img, atl.frames(cl3, stem))

@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.8'
+VERSION = '1.9'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1083,11 +1083,14 @@ class App(tk.Tk):
             self.step_nc(k, len(files), 'Копіюю у гру')
             rel = os.path.relpath(src, out)
             dst = os.path.join(dest, rel)
-            if not os.path.exists(dst):
+            # наші власні файли поруч з exe (MSK: переклад рядків ПК-порту і патч,
+            # що його підставляє) — у чистій грі їх ще немає, і це нормально
+            ours = rel.lower() in ('ua_strings.bin', 'dinput8.dll')
+            if not os.path.exists(dst) and not ours:
                 self.say(f'  ? у грі немає {rel} — пропускаю', 'warn')
                 continue
             keep = os.path.join(bk, rel)
-            if not os.path.exists(keep):
+            if os.path.exists(dst) and not os.path.exists(keep) and not ours:
                 os.makedirs(os.path.dirname(keep), exist_ok=True)
                 shutil.copy2(dst, keep)
             tmp = dst + '.new'
@@ -1127,6 +1130,12 @@ class App(tk.Tk):
             tmp = dst + '.new'
             shutil.copy2(src, tmp)
             os.replace(tmp, dst)
+            n += 1
+        # переклад рядків ПК-порту (MSK) лежить окремим файлом поруч з exe — прибрати,
+        # інакше dinput8.dll і далі підставлятиме українські рядки
+        extra = os.path.join(dest, 'ua_strings.bin')
+        if os.path.exists(extra):
+            os.remove(extra)
             n += 1
         self.set_status(f'Повернуто оригіналів: {n}.')
         self.say(f'Повернуто оригіналів: {n}.', 'ok')

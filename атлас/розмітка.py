@@ -22,7 +22,6 @@ sys.path.insert(0, ROOT)
 from PIL import Image, ImageDraw                                   # noqa: E402
 from maryskelter import atlas as atl, dds                          # noqa: E402
 from maryskelter.bra import Bra                                    # noqa: E402
-from maryskelter.cl3 import Cl3                                    # noqa: E402
 
 MARKS = os.path.join(HERE, 'написи.json')
 OUT = os.path.join(HERE, '_огляд')
@@ -54,7 +53,7 @@ def read_cl3(src):
     arc, _, name = src.partition('/')
     bk = os.path.join(ROOT, 'backup', 'msk', arc)
     path = bk if os.path.exists(bk) else os.path.join(game_dir(), arc)
-    return Cl3(Bra.read_some(path, [name])[name])
+    return atl.container(Bra.read_some(path, [name])[name])
 
 
 def load_marks():

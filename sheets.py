@@ -75,7 +75,9 @@ def columns(game, has_ja=None, has_pic=False, has_terms=False):
 def looks_like_key(s):
     if not s or ' ' in s or '\n' in s or not _ID.match(s):
         return False
-    return '_' in s or any(c.isdigit() for c in s) or (len(s) > 3 and s.isupper())
+    # «I...» — репліка, а не ключ: великими мають бути хоча б дві літери
+    return '_' in s or any(c.isdigit() for c in s) or (
+        len(s) > 3 and s.isupper() and sum(c.isalpha() for c in s) >= 2)
 
 
 # ---------------------------------------------------------------- читання JSON
@@ -160,7 +162,7 @@ DEFAULT_BOOKS = {
         [r'^Event/', '14 Персонажі, NPC, магазин'],
     ],
     'msk': (
-        [[r'^TTM1\.bra/Text/', '01 Інтерфейс']]
+        [[r'^(TTM1\.bra/Text/|Game\.bra/StringData/|MarySkelter\.exe$)', '01 Інтерфейс']]
         # сюжетні сцени 00GGxx: група GG = сотня номера сцени (00…11, 04 і 06 у грі немає)
         + [[rf'/EVENT/DATA/00{g:02d}\d\d\.gbin$', f'{g + 2:02d} Сюжет 00{g:02d}xx'] for g in range(12)]
         + [[r'table\.enc#0$', '17 Спорядження'],
@@ -791,6 +793,10 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
         out.append(f'термін «{en}» → «{ua}»: у перекладі не знайдено')
     g = _width_group(doc, e)
     n_src, n_tr = _nlines(src), _nlines(tr)
+    if n_tr < n_src and (e.get('hint') or '').startswith('опис тепер цілим полем'):
+        # раніше рядок показував лише кінець опису (translate_msk: table.fields) — старий
+        # переклад міг покривати тільки його, а тепер замінить опис цілком
+        out.append(f'схоже, перекладено лише кінець опису: рядків {n_tr}, а в оригіналі {n_src}')
     if g is not None and (g == ('діалог',) or gcount.get(g, 0) >= 5):
         # переносити можна по-своєму — аби рядків не стало більше, ніж уміщає місце
         if n_tr > glines[g]:

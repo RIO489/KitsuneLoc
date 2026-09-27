@@ -367,6 +367,13 @@ def erase(img, box, spec):
     ax0, ay0, ax1, ay1 = spec['область']
     x0, y0, x1, y1 = fx + ax0, fy + ay0, fx + ax1, fy + ay1
     if spec.get('тло', 'рядки') == 'прозорий':
+        if spec.get('полігон'):
+            # похилий підпис упритул до сусіднього малюнка (Pause під STOP у сценах):
+            # стираємо лише всередині багатокутника (точки відносно кадру)
+            m = Image.new('L', img.size, 0)
+            ImageDraw.Draw(m).polygon([(fx + x, fy + y) for x, y in spec['полігон']], fill=255)
+            img.paste((0, 0, 0, 0), (0, 0), m)
+            return
         img.paste((0, 0, 0, 0), (x0, y0, x1, y1))
         return
     if spec.get('тло') == 'смуга':                  # напис на смузі: смугу малюємо наново (_band)
@@ -433,6 +440,22 @@ def erase(img, box, spec):
                     px[x, y] = px[xl, y] if okl else px[xr, y]
         return
     k = 2                                           # краї усереднюємо по 2 пікселі
+    if spec.get('полігон'):
+        # напис упритул до похилого краю тла (Gold на червоному трикутнику в крамниці):
+        # усередині багатокутника — колір правого краю рядка, поза ним — прозорість;
+        # край згладжуємо (маска в 4× більшій роздільності)
+        q = 4
+        m = Image.new('L', ((x1 - x0) * q, (y1 - y0) * q), 0)
+        ImageDraw.Draw(m).polygon([((fx + x - x0) * q, (fy + y - y0) * q) for x, y in spec['полігон']],
+                                  fill=255)
+        m = m.resize((x1 - x0, y1 - y0), Image.LANCZOS).load()
+        for y in range(y0, y1):
+            R = [px[x, y] for x in range(x1, min(box[2], x1 + k))] or [px[x1 - 1, y]]
+            r = [sum(c[i] for c in R) / len(R) for i in range(4)]
+            for x in range(x0, x1):
+                w = m[x - x0, y - y0] / 255
+                px[x, y] = (round(r[0]), round(r[1]), round(r[2]), round(r[3] * w))
+        return
     for y in range(y0, y1):
         L = [px[x, y] for x in range(max(box[0], x0 - k), x0)] or [px[x0, y]]
         R = [px[x, y] for x in range(x1, min(box[2], x1 + k))] or [px[x1 - 1, y]]
@@ -646,6 +669,27 @@ def _band(orig, nx0, nx1):
 
 
 # ------------------------------------------------------------------ атлас цілком
+class Plain:
+    """Окрема текстура .dds без нарізки TI (Game.bra/EVENT/parts1.dds — STOP/SKIP/AUTO/LOG
+    у сценах). Та сама поведінка, що в Cl3 для pair/frames/rebuild; кадрів у нарізці
+    немає, тож усі кадри розмітки — з явною "рамка"."""
+
+    def __init__(self, data):
+        self.files = [['texture.tid', bytearray(data)]]
+
+    def replace(self, name, new_data):
+        self.files[0][1] = bytearray(new_data)
+
+    def build(self, align=1):
+        return bytes(self.files[0][1])
+
+
+def container(blob):
+    """CL3-атлас або окрема текстура .dds (Plain)."""
+    from .cl3 import Cl3
+    return Plain(blob) if bytes(blob[:4]) == b'DDS ' else Cl3(blob)
+
+
 def pair(cl3, stem=None):
     """Файли нарізки й текстури в CL3: ([ім'я, дані, ...] TI, те саме tid).
     Якщо пар кілька — `stem` (ім'я без розширення) вибирає потрібну."""
@@ -659,6 +703,8 @@ def frames(cl3, stem=None):
     """{індекс кадру: (x0, y0, x1, y1)} у пікселях атласу."""
     from .ti import Ti
     ti_f, tid_f = pair(cl3, stem)
+    if ti_f is None:                        # Plain: нарізки немає, лише ручні рамки
+        return {}
     h, w = __import__('struct').unpack_from('<2I', bytes(tid_f[1][:20]), 12)
     return {i: (x0, y0, x1, y1) for i, x0, y0, x1, y1 in Ti(bytes(ti_f[1])).frames(w, h)}
 
@@ -688,12 +734,11 @@ def rebuild(blob, mark, tr, styles):
     """Перемалювати написи одного атласу. `mark` — розмітка атласу з
     написи.json, `tr` — {ключ: переклад}. Повертає (нові байти CL3 | None,
     к-сть написів, [попередження])."""
-    from .cl3 import Cl3
     from . import dds
     todo = [(i, s) for i, s in mark['кадри'].items() if tr.get(key_of(s))]
     if not todo:
         return None, 0, []
-    cl3 = Cl3(blob)
+    cl3 = container(blob)
     _ti, tid_f = pair(cl3, mark.get('текстура'))
     boxes = frames(cl3, mark.get('текстура'))
     data = bytes(tid_f[1])
