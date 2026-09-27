@@ -252,7 +252,7 @@ def main():
         merged, n = atl.fold_user_marks(natl.MARKS)
         save_marks(merged)
         atl.save_user(natl.MARKS, {k: v for k, v in atl.load_user(natl.MARKS).items()
-                                   if k.startswith('_')})
+                                   if k.startswith('_') and k != '_прибрано'})
         print(f'забрано в основну розмітку кадрів: {n}')
         # свої стилі (спільні для обох ігор) — тим самим кодом, що й розмітка.py
         import importlib.util

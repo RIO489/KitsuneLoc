@@ -392,7 +392,7 @@ def cmd_fold():
     merged, n = atl.fold_user_marks('написи.json')
     save_marks(merged)
     atl.save_user('написи.json', {k: v for k, v in atl.load_user('написи.json').items()
-                                  if k.startswith('_')})
+                                  if k.startswith('_') and k != '_прибрано'})
     print(f'забрано в основну розмітку кадрів: {n}')
     fold_styles()
 

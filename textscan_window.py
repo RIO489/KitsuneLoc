@@ -24,6 +24,8 @@ PAD_AREA = 3                    # область стирання = рамка �
 PAD_FRAME = 12                  # кадр = рамка напису + місце під довший переклад
 BG = (24, 16, 32, 255)
 MODES = {'рядки': 'кнопка / плашка з однорідним тлом', 'прозорий': 'напис на прозорому'}
+# налаштування вигляду прийнятого напису, які переживають відкликання й нову рамку
+KEEP = ('правки', 'правки до шрифту', 'літери з оригіналу', 'кегль', 'вирівняти', 'ключ', 'приклад')
 
 
 class TextScan(tk.Toplevel):
@@ -47,6 +49,7 @@ class TextScan(tk.Toplevel):
         self.frames = {}
         self.cands = []                 # [{текст, рамка, стан}]: стан '' | 'вибрано'
         self.sel = None
+        self.sel_done = None            # вибраний прийнятий напис (лише перегляд)
         self.drag = None
         self.photo = None
         self.prev_photos = []
@@ -145,7 +148,8 @@ class TextScan(tk.Toplevel):
         ttk.Label(right, text='Вибраний напис', font=('Segoe UI', 11, 'bold')).pack(anchor='w')
         ttk.Label(right, text='Текст (англійською, як на картинці):').pack(anchor='w', pady=(8, 0))
         self.text = tk.StringVar()
-        ttk.Entry(right, textvariable=self.text).pack(fill='x')
+        self.e_text = ttk.Entry(right, textvariable=self.text)
+        self.e_text.pack(fill='x')
         ttk.Label(right, text='Стиль (яким малювати переклад):').pack(anchor='w', pady=(8, 0))
         self.style = tk.StringVar()
         srow = ttk.Frame(right)
@@ -164,9 +168,12 @@ class TextScan(tk.Toplevel):
         self.style.trace_add('write', lambda *_: self._own_state())
         ttk.Label(right, text='Тло під написом (як стерти старий):').pack(anchor='w', pady=(8, 0))
         self.mode = tk.StringVar(value='рядки')
+        self.radios = []
         for m, d in MODES.items():
-            ttk.Radiobutton(right, text=f'{m} — {d}', value=m, variable=self.mode,
-                            command=self._changed).pack(anchor='w')
+            rb = ttk.Radiobutton(right, text=f'{m} — {d}', value=m, variable=self.mode,
+                                 command=self._changed)
+            rb.pack(anchor='w')
+            self.radios.append(rb)
         for v in (self.text, self.style):
             v.trace_add('write', lambda *_: self._changed())
         pv = ttk.Frame(right)
@@ -185,6 +192,8 @@ class TextScan(tk.Toplevel):
         self.b_ok.pack(side='left')
         self.b_no = ttk.Button(bt, text='Не текст', command=self._reject)
         self.b_no.pack(side='left', padx=6)
+        self.b_revoke = ttk.Button(bt, text='Відкликати прийняття', command=self._revoke)
+        self.b_revoke.pack(side='left')
         ttk.Label(right, text='Прийняте потрапляє в розмітку перекладача (атлас, файл «.мої.json»). '
                               'Після «1. Дістати текст з гри» напис з\'явиться в книзі написів і в '
                               'редакторі — там його й перекладай. Надішли цей файл власнику програми, '
@@ -193,8 +202,10 @@ class TextScan(tk.Toplevel):
         self._enable(False)
 
     def _enable(self, on):
-        for b in (self.b_ok, self.b_no, self.b_styles, self.b_new_style):
+        for b in (self.b_ok, self.b_no, self.b_styles, self.b_new_style, self.e_text, *self.radios):
             b.state(['!disabled'] if on else ['disabled'])
+        self.style_cb.state(['readonly', '!disabled'] if on else ['disabled'])
+        self.b_revoke.state(['!disabled'] if getattr(self, 'sel_done', None) is not None else ['disabled'])
         self._own_state()
 
     def _gallery(self):
@@ -235,7 +246,8 @@ class TextScan(tk.Toplevel):
     def _rejected(self, key):
         return atl.load_user(self.name).get('_відхилено', {}).get(key, [])
 
-    def _marked_boxes(self, src, stem, frames, marks=None):
+    def _marked(self, src, stem, frames, marks=None):
+        """Прийняті написи текстури: [{ключ, spec, рамка}] (рамка — кадр в атласі)."""
         mk = (marks if marks is not None else self._marks()).get(src)
         if not mk:
             return []
@@ -245,8 +257,11 @@ class TextScan(tk.Toplevel):
         for i, spec in mk.get('кадри', {}).items():
             b = atl.box_of(i, spec, frames)
             if b:
-                out.append(list(b))
+                out.append({'ключ': i, 'spec': spec, 'рамка': list(b)})
         return out
+
+    def _marked_boxes(self, src, stem, frames, marks=None):
+        return [d['рамка'] for d in self._marked(src, stem, frames, marks)]
 
     def _fill(self):
         self.tree.delete(*self.tree.get_children())
@@ -389,11 +404,12 @@ class TextScan(tk.Toplevel):
         self.multi = len(parts) > 1
         self.img, self.frames = part[1], part[2]
         rej = self._rejected(f'{src}|{part[0]}')
-        self.done = self._marked_boxes(src, part[0] if self.multi else '', self.frames)
+        self.done = self._marked(src, part[0] if self.multi else '', self.frames)
         self.cands = [dict(c) for c in (self.found.get(src) or {}).get(part[0], [])
                       if not any(textscan.overlap(c['рамка'], r) > 0.5 for r in rej)
-                      and not any(textscan.overlap(c['рамка'], d) > 0.5 for d in self.done)]
+                      and not any(textscan.overlap(c['рамка'], d['рамка']) > 0.5 for d in self.done)]
         self.sel = None
+        self.sel_done = None
         self._select(None)
         bg = Image.new('RGBA', self.img.size, BG)
         bg.alpha_composite(self.img)
@@ -469,8 +485,10 @@ class TextScan(tk.Toplevel):
             self._view_key = None
             self._view()
         c.delete('box')
-        for b in self.done:
-            c.create_rectangle(*[v * z for v in b], outline='#3ddc84', width=2, tags='box')
+        for k, d in enumerate(self.done):
+            sel = k == self.sel_done
+            c.create_rectangle(*[v * z for v in d['рамка']], outline='#4aa8ff' if sel else '#3ddc84',
+                               width=3 if sel else 2, tags='box')
         for k, cd in enumerate(self.cands):
             b = cd['рамка']
             col = '#ff8a00' if k == self.sel else '#ffd400'
@@ -508,7 +526,15 @@ class TextScan(tk.Toplevel):
                 self._select(k)
                 self.drag = ('move', None, list(self.cands[k]['рамка']), x, y)
                 return
-        self.drag = ('new', None, None, x, y)
+        # клік по прийнятому напису — подивитись (змінити — «Відкликати прийняття»);
+        # потягнути — нова рамка, як і деінде (кадр буває більшим за сам напис)
+        hit = [k for k, d in enumerate(self.done)
+               if d['рамка'][0] <= x <= d['рамка'][2] and d['рамка'][1] <= y <= d['рамка'][3]]
+
+        def area(k):
+            b = self.done[k]['рамка']
+            return (b[2] - b[0]) * (b[3] - b[1])
+        self.drag = ('new', min(hit, key=area) if hit else None, None, x, y)
 
     def _motion(self, e):
         if not self.drag:
@@ -543,9 +569,13 @@ class TextScan(tk.Toplevel):
         self._redraw()
 
     def _release(self, _e):
-        if self.drag and self.drag[0] == 'new':            # клік по порожньому — зняти вибір
+        if self.drag and self.drag[0] == 'new':            # клік без рамки кандидата
+            k = self.drag[1]
             self.drag = None
-            self._select(None)
+            if k is None:
+                self._select(None)                         # по порожньому — зняти вибір
+            else:
+                self._select_done(k)
             return
         if self.drag and self.sel is not None:
             b = self.cands[self.sel]['рамка']
@@ -561,6 +591,7 @@ class TextScan(tk.Toplevel):
     # ------------------------------------------------------------------ вибраний
     def _select(self, k):
         self.sel = k
+        self.sel_done = None
         self._enable(k is not None)
         if k is None:
             self.text.set('')
@@ -577,11 +608,50 @@ class TextScan(tk.Toplevel):
         self._redraw()
         self._changed()
 
+    def _select_done(self, k):
+        """Прийнятий напис: показати, як його розмічено, без права змінювати."""
+        self._select(None)
+        self.sel_done = k
+        d = self.done[k]
+        self._loading = True
+        self.text.set(d['spec'].get('текст', ''))
+        self.style.set(d['spec'].get('стиль', ''))
+        self.mode.set(d['spec'].get('тло', ''))
+        self._loading = False
+        self._enable(False)
+        self.status.set('Цей напис уже прийнято. Щоб змінити текст, стиль чи рамку — '
+                        '«Відкликати прийняття».')
+        self._redraw()
+        self._render(d['ключ'], d['spec'])
+
+    def _revoke(self):
+        """Прийнятий напис → знову кандидат з тими самими текстом, стилем і тлом. У розмітці
+        він лишається, доки не натиснеш «Прийняти напис» (замінить) чи «Не текст» (прибере)."""
+        if self.sel_done is None:
+            return
+        d = self.done.pop(self.sel_done)
+        spec = d['spec']
+        fx0, fy0, fx1, fy1 = d['рамка']
+        a = spec.get('область')
+        box = ([fx0 + a[0], fy0 + a[1], fx0 + a[2], fy0 + a[3]]
+               if a and not spec.get('обертання') else [fx0, fy0, fx1, fy1])
+        self.cands.append({'текст': spec.get('текст', ''), 'рамка': box, 'стиль': spec.get('стиль'),
+                           'тло': spec.get('тло'), 'ручна': True,
+                           'старий': {'ключ': d['ключ'], 'spec': spec, 'рамка0': list(box)}})
+        self._select(len(self.cands) - 1)
+        self.status.set('Напис відкликано: зміни, що треба, і «Прийняти напис». Доки не натиснеш, '
+                        'у розмітці лишається старий варіант.')
+
     def _guess(self):
         """Стиль і тло — за кольором літер і прозорістю навколо напису."""
         cd = self.cands[self.sel]
         x0, y0, x1, y1 = cd['рамка']
         if x1 - x0 < 2 or y1 - y0 < 2:
+            return
+        if cd.get('старий'):                       # відкликаний: тло й стиль — як були
+            self.mode.set(cd.get('тло') or 'рядки')
+            if cd.get('стиль'):
+                self.style.set(cd['стиль'])
             return
         crop = self.img.crop((x0, y0, x1, y1))
         px = [p for p in crop.getdata() if p[3] > 200 and max(p[:3]) > 150]
@@ -616,7 +686,21 @@ class TextScan(tk.Toplevel):
         self.style.set(min(self.style_names, key=dist))
 
     def _spec(self):
-        """Кадр розмітки для вибраної рамки: (ключ, spec) у форматі написи.json."""
+        """Кадр розмітки для вибраної рамки: (ключ, spec) у форматі написи.json. Відкликаний
+        напис: рамка й тло ті самі — старий кадр з новими текстом і стилем; інакше — новий,
+        але з тим самим ключем і додатковими налаштуваннями вигляду."""
+        cd = self.cands[self.sel]
+        old = cd.get('старий')
+        if old and cd['рамка'] == old['рамка0'] and self.mode.get() == old['spec'].get('тло'):
+            return old['ключ'], dict(old['spec'], текст=self.text.get().strip() or '?',
+                                     стиль=self.style.get())
+        key, spec = self._new_spec()
+        if old:
+            key = old['ключ']
+            spec.update({k: v for k, v in old['spec'].items() if k in KEEP})
+        return key, spec
+
+    def _new_spec(self):
         cd = self.cands[self.sel]
         x0, y0, x1, y1 = cd['рамка']
         W, H = self.img.size
@@ -640,22 +724,26 @@ class TextScan(tk.Toplevel):
         if getattr(self, '_loading', False) or self.sel is None:
             return
         self.cands[self.sel]['текст'] = self.text.get()
+        if self.cands[self.sel].get('старий'):
+            self.cands[self.sel]['тло'] = self.mode.get()
         if self.style.get():
             self.cands[self.sel]['стиль'] = self.style.get()
         if self.pending:
             self.after_cancel(self.pending)
         self.pending = self.after(250, self._render)
 
-    def _render(self):
+    def _render(self, key=None, spec=None):
         self.pending = None
-        if self.sel is None or not self.style.get():
-            return
+        if spec is None:
+            if self.sel is None or not self.style.get():
+                return
+            key, spec = self._spec()
         self.gen += 1
-        gen, img, (key, spec) = self.gen, self.img, self._spec()
+        gen, img = self.gen, self.img
         styles = self.styles
+        box = tuple(atl.box_of(key, spec, self.frames))       # кадр TI — без "рамка" в розмітці
 
         def work():
-            box = tuple(spec['рамка'])
             try:
                 a = img.copy()
                 atl.erase(a, box, spec)
@@ -691,7 +779,18 @@ class TextScan(tk.Toplevel):
             messagebox.showinfo('Напис', 'Впиши англійський текст напису (як на картинці).', parent=self)
             return
         src, stem = self.cur
+        cd = self.cands[self.sel]
+        old = cd.get('старий')
+        if old and self.mode.get() not in MODES and cd['рамка'] != old['рамка0']:
+            messagebox.showinfo('Напис', f'Тло «{self.mode.get()}» прив\'язане до старої рамки. '
+                                'Поверни рамку як була або вибери, як стерти старий напис.', parent=self)
+            return
         key, spec = self._spec()
+        if old and atl.key_of(old['spec']) != atl.key_of(spec) and not messagebox.askyesno(
+                'Напис', f'Текст змінився: «{old["spec"].get("текст", "")}» → «{spec["текст"]}».\n\n'
+                'У книзі написів це буде новий рядок: переклад старого (якщо він був) сюди не '
+                'перейде. Прийняти?', parent=self):
+            return
         marks = atl.load_marks(self.name)
         mk = marks.get(src)
         if mk is None:
@@ -704,7 +803,8 @@ class TextScan(tk.Toplevel):
             return
         mk.setdefault('кадри', {})[key] = spec
         atl.save_user_marks(self.name, marks)
-        self.done.append(spec['рамка'])
+        self.done.append({'ключ': key, 'spec': spec,
+                          'рамка': list(atl.box_of(key, spec, self.frames) or spec['рамка'])})
         del self.cands[self.sel]
         self._select(None)
         self._update_row()
@@ -720,7 +820,15 @@ class TextScan(tk.Toplevel):
         if self.sel is None:
             return
         cd = self.cands[self.sel]
-        if not cd.get('ручна'):
+        old = cd.get('старий')
+        if old:                                          # відкликаний — прибрати з розмітки
+            if not messagebox.askyesno('Напис', f'Прибрати напис «{old["spec"].get("текст", "")}» '
+                                       'з розмітки? У книзі його більше не буде.', parent=self):
+                return
+            marks = atl.load_marks(self.name)
+            (marks.get(self.cur[0]) or {}).get('кадри', {}).pop(old['ключ'], None)
+            atl.save_user_marks(self.name, marks)
+        elif not cd.get('ручна'):
             user = atl.load_user(self.name)
             rej = user.setdefault('_відхилено', {})
             rej.setdefault(f'{self.cur[0]}|{self.cur[1]}', []).append(cd['рамка'])

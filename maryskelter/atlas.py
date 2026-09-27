@@ -65,7 +65,8 @@ def load_json(name):
 # лежить поруч у «<назва>.мої.json» (не в git: git pull ніколи не конфліктує) і
 # накладається зверху кадр за кадром. Власник забирає це в основну — fold_user_marks.
 # Службові ключі файлу перекладача: "_відхилено" — {джерело: [[x0, y0, x1, y1], ...]}
-# (що в пошуку позначено «не текст»).
+# (що в пошуку позначено «не текст»), "_прибрано" — {джерело: [ключі кадрів основної
+# розмітки, які перекладач відкликав]}.
 def user_file(name):
     return name[:-5] + '.мої.json' if name.endswith('.json') else name + '.мої'
 
@@ -100,15 +101,29 @@ def load_marks(name, user=True):
             if k != 'кадри':
                 base[k] = v
         base.setdefault('кадри', {}).update(copy.deepcopy(mk.get('кадри', {})))
+    # кадри основної розмітки, які перекладач відкликав («Знайти написи»)
+    for src, keys in load_user(name).get('_прибрано', {}).items():
+        if src in marks:
+            fr = {i: sp for i, sp in marks[src].get('кадри', {}).items() if i not in keys}
+            marks[src] = dict(marks[src], кадри=fr)
     return marks
 
 
 def save_user_marks(name, marks):
     """Записати в «мої» лише те, чим `marks` відрізняється від основної розмітки
-    (нові атласи, нові й змінені кадри). Службові ключі перекладача зберігаються."""
+    (нові атласи, нові й змінені кадри; кадри основної, яких у `marks` немає, — у
+    "_прибрано"). Інші службові ключі перекладача зберігаються."""
     base = load_marks(name, user=False)
     old = load_user(name)
-    out = {k: v for k, v in old.items() if k.startswith('_')}
+    out = {k: v for k, v in old.items() if k.startswith('_') and k != '_прибрано'}
+    gone = {}
+    for src, b in base.items():
+        have = (marks.get(src) or {}).get('кадри', {})
+        keys = [i for i in b.get('кадри', {}) if i not in have]
+        if keys:
+            gone[src] = keys
+    if gone:
+        out['_прибрано'] = gone
     for src, mk in marks.items():
         if src.startswith('_'):
             continue
@@ -166,6 +181,7 @@ def fold_user_marks(name):
     user = load_user(name)
     merged = load_marks(name)
     n = sum(len(v.get('кадри', {})) for k, v in user.items() if not k.startswith('_'))
+    n += sum(len(v) for v in user.get('_прибрано', {}).values())       # відкликані — теж зміна
     base_all = _read(name)
     base_all.update(merged)
     return base_all, n
