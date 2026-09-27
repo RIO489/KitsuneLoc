@@ -60,7 +60,9 @@ class TextScan(tk.Toplevel):
         self._build()
         self._fill()
         self.after(60, self._poll)
-        self.bind('<Delete>', lambda e: self._reject())
+        # Delete / BackSpace — прибрати вибрану рамку; але не коли набираєш текст у полі
+        for k in ('<Delete>', '<BackSpace>'):
+            self.bind(k, self._key_reject)
 
     # ------------------------------------------------------------------ вигляд
     def _build(self):
@@ -104,8 +106,9 @@ class TextScan(tk.Toplevel):
         z = ttk.Combobox(bar, textvariable=self.zoom, values=ZOOMS, state='readonly', width=6)
         z.pack(side='left', padx=4)
         z.bind('<<ComboboxSelected>>', lambda e: self._redraw(True))
-        ttk.Label(bar, text='Зелене — вже розмічено, жовте — знайдено. Порожнє місце: потягни мишею — '
-                            'нова рамка.', style='Hint.TLabel').pack(side='left', padx=8)
+        ttk.Label(bar, text='Зелене — розмічено, жовте — знайдено. Ліва кнопка по порожньому — нова рамка, '
+                            'права — тягнути картинку, Delete / BackSpace — прибрати рамку.',
+                  style='Hint.TLabel').pack(side='left', padx=8)
         cv = ttk.Frame(mid)
         cv.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(cv, bg='#181020', highlightthickness=0, cursor='crosshair')
@@ -120,6 +123,11 @@ class TextScan(tk.Toplevel):
         self.canvas.bind('<ButtonPress-1>', self._press)
         self.canvas.bind('<B1-Motion>', self._motion)
         self.canvas.bind('<ButtonRelease-1>', self._release)
+        # права кнопка — тягнути саму картинку (навігація)
+        self.canvas.bind('<ButtonPress-3>', lambda e: (self.canvas.scan_mark(e.x, e.y),
+                                                       self.canvas.configure(cursor='fleur')))
+        self.canvas.bind('<B3-Motion>', lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
+        self.canvas.bind('<ButtonRelease-3>', lambda e: self.canvas.configure(cursor='crosshair'))
         self.canvas.bind('<MouseWheel>', lambda e: self.canvas.yview_scroll(-1 if e.delta > 0 else 1, 'units'))
         self.canvas.bind('<Shift-MouseWheel>',
                          lambda e: self.canvas.xview_scroll(-1 if e.delta > 0 else 1, 'units'))
@@ -132,8 +140,12 @@ class TextScan(tk.Toplevel):
         ttk.Entry(right, textvariable=self.text).pack(fill='x')
         ttk.Label(right, text='Стиль (яким малювати переклад):').pack(anchor='w', pady=(8, 0))
         self.style = tk.StringVar()
-        cb = ttk.Combobox(right, textvariable=self.style, values=self.style_names, state='readonly')
-        cb.pack(fill='x')
+        srow = ttk.Frame(right)
+        srow.pack(fill='x')
+        cb = ttk.Combobox(srow, textvariable=self.style, values=self.style_names, state='readonly')
+        cb.pack(side='left', fill='x', expand=True)
+        self.b_styles = ttk.Button(srow, text='Усі стилі…', command=self._gallery)
+        self.b_styles.pack(side='left', padx=(6, 0))
         ttk.Label(right, text='Тло під написом (як стерти старий):').pack(anchor='w', pady=(8, 0))
         self.mode = tk.StringVar(value='рядки')
         for m, d in MODES.items():
@@ -165,8 +177,12 @@ class TextScan(tk.Toplevel):
         self._enable(False)
 
     def _enable(self, on):
-        for b in (self.b_ok, self.b_no):
+        for b in (self.b_ok, self.b_no, self.b_styles):
             b.state(['!disabled'] if on else ['disabled'])
+
+    def _gallery(self):
+        if self.sel is not None:
+            StyleGallery(self)
 
     # ------------------------------------------------------------------ список
     def _marks(self):
@@ -598,6 +614,12 @@ class TextScan(tk.Toplevel):
         self._update_row()
         self.status.set(f'Прийнято: «{spec["текст"]}». Після «1» він з\'явиться в книзі написів.')
 
+    def _key_reject(self, e):
+        if isinstance(e.widget, (tk.Entry, ttk.Entry, ttk.Combobox, tk.Text)):
+            return None                                  # у полі вводу клавіша редагує текст
+        self._reject()
+        return 'break'
+
     def _reject(self):
         if self.sel is None:
             return
@@ -616,3 +638,129 @@ class TextScan(tk.Toplevel):
         if s:
             done = len((self._marks().get(self.cur[0]) or {}).get('кадри', {}))
             self.tree.item(s[0], values=(len(self.cands) or '', done or ''))
+
+
+class StyleGallery(tk.Toplevel):
+    """«Усі стилі»: вибраний напис, намальований кожним стилем гри (стерте тло + англійський
+    текст), — щоб не перебирати стилі по одному. Клік — вибрати, подвійний клік чи «Взяти
+    вибраний» — у вікно пошуку. Уживані в грі стилі — першими."""
+
+    COLS = 3
+    CARD_W = 300                            # ширина картинки в картці, пікселі екрана
+
+    def __init__(self, scan):
+        super().__init__(scan)
+        import collections
+        self.scan = scan
+        self.key, self.spec = scan._spec()
+        self.img = scan.img
+        self.styles = scan.styles
+        used = collections.Counter(s.get('стиль') for m in scan._marks().values()
+                                   for s in m.get('кадри', {}).values())
+        self.names = sorted(scan.style_names, key=lambda n: (-used.get(n, 0), n))
+        self.sel = self.names.index(scan.style.get()) if scan.style.get() in self.names else 0
+        self.q = queue.Queue()
+        self.photos = {}
+        self.alive = True
+        self.title(f'Усі стилі — «{self.spec["текст"]}»')
+        self.geometry('1060x760')
+        box = tuple(self.spec['рамка'])
+        self.zoom = min(2.0, self.CARD_W / max(1, box[2] - box[0]))
+
+        top = ttk.Frame(self, padding=(10, 10, 10, 4))
+        top.pack(fill='x')
+        ttk.Label(top, text='Оригінал:').pack(side='left', anchor='n')
+        self.orig_ph = self._photo(self.img.crop(box))
+        tk.Label(top, image=self.orig_ph, bg='#181020', bd=0).pack(side='left', padx=8)
+        ttk.Label(top, text='Клік — вибрати, подвійний клік — взяти. Перші — стилі, які вже є в грі.',
+                  style='Hint.TLabel').pack(side='left', padx=8)
+
+        body = ttk.Frame(self)
+        body.pack(fill='both', expand=True, padx=10)
+        self.canvas = tk.Canvas(body, highlightthickness=0, bg='#221b2b')
+        sb = ttk.Scrollbar(body, orient='vertical', command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        self.canvas.pack(side='left', fill='both', expand=True)
+        self.inner = tk.Frame(self.canvas, bg='#221b2b')
+        self.canvas.create_window((0, 0), window=self.inner, anchor='nw')
+        self.inner.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.bind('<MouseWheel>', self._wheel)
+        self.cards = []
+        for k, name in enumerate(self.names):
+            card = tk.Frame(self.inner, bg='#221b2b', highlightthickness=2, highlightbackground='#221b2b',
+                            padx=6, pady=4)
+            card.grid(row=k // self.COLS, column=k % self.COLS, sticky='nw', padx=4, pady=4)
+            lab = tk.Label(card, text=name, bg='#221b2b', fg='#eeeeee', anchor='w', font=('Segoe UI', 9))
+            lab.pack(anchor='w')
+            pic = tk.Label(card, text='…', bg='#181020', fg='#999999', bd=0)
+            pic.pack(anchor='w')
+            for w in (card, lab, pic):
+                w.bind('<Button-1>', lambda e, n=k: self._select(n))
+                w.bind('<Double-Button-1>', lambda e, n=k: (self._select(n), self._take()))
+                w.bind('<MouseWheel>', self._wheel)
+            self.cards.append((card, pic))
+
+        bot = ttk.Frame(self, padding=(10, 6, 10, 10))
+        bot.pack(fill='x')
+        ttk.Button(bot, text='Закрити', command=self._close).pack(side='right')
+        ttk.Button(bot, text='Взяти вибраний', style='Accent.TButton', command=self._take).pack(side='right', padx=8)
+        self.protocol('WM_DELETE_WINDOW', self._close)
+        self._select(self.sel)
+        threading.Thread(target=self._work, daemon=True).start()
+        self.after(50, self._poll)
+
+    def _photo(self, im):
+        bg = Image.new('RGBA', im.size, BG)
+        bg.alpha_composite(im)
+        if self.zoom != 1.0:
+            bg = bg.resize((max(1, int(bg.width * self.zoom)), max(1, int(bg.height * self.zoom))),
+                           Image.LANCZOS)
+        return ImageTk.PhotoImage(bg.convert('RGB'))
+
+    def _work(self):
+        box = tuple(self.spec['рамка'])
+        for k, name in enumerate(self.names):
+            if not self.alive:
+                return
+            spec = dict(self.spec, стиль=name)
+            try:
+                im = self.img.copy()
+                atl.draw(im, box, spec, self.styles, spec['текст'])
+                self.q.put((k, im.crop(box), None))
+            except Exception as ex:                                   # noqa: BLE001
+                self.q.put((k, None, str(ex)))
+
+    def _poll(self):
+        if not self.alive or not self.winfo_exists():
+            return
+        try:
+            while True:
+                k, im, err = self.q.get_nowait()
+                pic = self.cards[k][1]
+                if im is None:
+                    pic.configure(text=f'не вдалося: {err}'[:60])
+                    continue
+                self.photos[k] = self._photo(im)
+                pic.configure(image=self.photos[k], text='')
+        except queue.Empty:
+            pass
+        self.after(50, self._poll)
+
+    def _wheel(self, e):
+        self.canvas.yview_scroll(-1 if e.delta > 0 else 1, 'units')
+        return 'break'
+
+    def _select(self, n):
+        self.cards[self.sel][0].configure(highlightbackground='#221b2b')
+        self.sel = n
+        self.cards[n][0].configure(highlightbackground='#ff8a00')
+
+    def _take(self):
+        if self.scan.winfo_exists() and self.scan.sel is not None:
+            self.scan.style.set(self.names[self.sel])
+        self._close()
+
+    def _close(self):
+        self.alive = False
+        self.destroy()
