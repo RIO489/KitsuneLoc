@@ -175,6 +175,31 @@ def save_user_style(name, style):
     save_user(STYLES, user)
 
 
+MY_GROUP = 'Мої'            # група свого стилю, якщо перекладач не дав іншої
+
+
+def game_styles(styles, game):
+    """Назви стилів гри: основні (у Neptunia — з префіксом «неп-») і свої, створені для неї."""
+    nep = game == 'nep'
+    return sorted(k for k, v in styles.items() if not k.startswith('_') and
+                  ((v.get('гра') == game) if v.get('мій') else (k.startswith('неп-') == nep)))
+
+
+def group_of(style):
+    return style.get('група') or (MY_GROUP if style.get('мій') else 'Інше')
+
+
+def style_groups(styles, names):
+    """[(група, [назви])] для `names`: групи й стилі в них — у порядку файлів стилів
+    (основні з стилі.json, далі свої), тож групи перекладача — після основних."""
+    names = set(names)
+    out = {}
+    for k, v in styles.items():
+        if k in names:
+            out.setdefault(group_of(v), []).append(k)
+    return list(out.items())
+
+
 def fold_user_marks(name):
     """Для власника: розмітку перекладача — в основну; повертає, скільки кадрів забрано.
     Службові ключі ("_відхилено") лишаються у «мої»."""

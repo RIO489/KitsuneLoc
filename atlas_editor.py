@@ -104,11 +104,17 @@ def tuned(spec, edit=None, real=None):
     return spec
 
 
-def render(atlases, marks, styles, key, text, game='msk', edit=None, real=None):
+def restyled(spec, restyle=None):
+    """Кадр з пробною зміною стилю (`restyle` — {стиль у розмітці: новий стиль})."""
+    new = (restyle or {}).get(spec['стиль'])
+    return dict(spec, стиль=new) if new else spec
+
+
+def render(atlases, marks, styles, key, text, game='msk', edit=None, real=None, restyle=None):
     """[(оригінал, результат, масштаб, [попередження])] для кожного варіанта."""
     res = []
     for src, i, spec in variants(marks, key):
-        spec = tuned(spec, edit, real)
+        spec = tuned(restyled(spec, restyle), edit, real)
         if game == 'nep' and text:
             from neptunia import atlas as natl
             text_i = natl.text_for(spec, text)   # розрізані слова: «!!» окремим спрайтом
@@ -159,6 +165,8 @@ class Editor(tk.Toplevel):
             self.marks = atl.load_marks('написи.json')
             self.atlases = Atlases(bk, app.root_dir())
         self.styles = atl.load_styles()
+        self.name = MARKS[self.game]            # для редактора стилю (textscan_window.StyleEditor)
+        self.restyle = {}                        # ключ -> {стиль у розмітці: пробний стиль} (ще не записано)
         self.rows = self._read_book()           # [{id, src, tr, where}]
         self.edits = {}                          # id -> новий переклад (ще не збережений)
         self.cur = None
@@ -370,13 +378,29 @@ class Editor(tk.Toplevel):
         ttk.Label(grid, text='Оригінал', style='Hint.TLabel').grid(row=0, column=0, sticky='w')
         ttk.Label(grid, text='У грі буде', style='Hint.TLabel').grid(row=0, column=1, sticky='w',
                                                                    padx=(12, 0))
-        self.cells = []
+        ttk.Label(grid, text='Стиль', style='Hint.TLabel').grid(row=0, column=2, sticky='w', padx=(12, 0))
+        from textscan_window import StylePicker
+        self.cells, self.style_rows = [], []
         for k in range(MAX_VARIANTS):
             a = tk.Label(grid, bg=c['bg'], bd=0)
             b = tk.Label(grid, bg=c['bg'], bd=0)
             a.grid(row=k + 1, column=0, sticky='nw', pady=4)
             b.grid(row=k + 1, column=1, sticky='nw', pady=4, padx=(12, 0))
             self.cells.append((a, b))
+            # стиль цього варіанта: вибір за групами, свій стиль на основі цього чи зміна свого
+            sf = ttk.Frame(grid)
+            sf.grid(row=k + 1, column=2, sticky='nw', pady=4, padx=(12, 0))
+            var = tk.StringVar()
+            pick = StylePicker(sf, var, width=24)
+            pick.pack(anchor='w')
+            var.trace_add('write', lambda *_, k=k: self._restyle(k))
+            bf = ttk.Frame(sf)
+            bf.pack(anchor='w', pady=(3, 0))
+            ttk.Button(bf, text='Новий стиль…', command=lambda k=k: self._edit_style(k, False)).pack(side='left')
+            b_own = ttk.Button(bf, text='Змінити свій…', command=lambda k=k: self._edit_style(k, True))
+            b_own.pack(side='left', padx=(4, 0))
+            self.style_rows.append((sf, var, pick, b_own))
+        self._pickers_refresh()
 
         bot = ttk.Frame(self)
         bot.pack(fill='x', padx=10, pady=(4, 10))
@@ -463,11 +487,12 @@ class Editor(tk.Toplevel):
         gen, key, text = self.gen, self.cur, self.text.get().strip()
         self.note.set('малюю…')
 
-        edit, real = self.suggest.get(key), self.real.get()
+        edit, real, restyle = self.suggest.get(key), self.real.get(), self.restyle.get(key)
 
         def work():
             try:
-                res = render(self.atlases, self.marks, self.styles, key, text, self.game, edit, real)
+                res = render(self.atlases, self.marks, self.styles, key, text, self.game, edit, real,
+                             restyle)
                 err = None
             except Exception as ex:                                   # noqa: BLE001
                 res, err = [], str(ex)
@@ -492,6 +517,7 @@ class Editor(tk.Toplevel):
                 b.configure(image='')
                 a.grid_remove()                 # порожня мітка малюється сірою рисочкою
                 b.grid_remove()
+        self._style_rows_show()
         if err:
             self.note.set(f'Не вдалося намалювати: {err}')
             self.note_lbl.configure(foreground=self.warn_color)
@@ -522,6 +548,8 @@ class Editor(tk.Toplevel):
     def _style(self, key, tried=True):
         """Стиль першого варіанта напису з правками розмітки (і пробними)."""
         _src, _i, spec = variants(self.marks, key)[0]
+        if tried:
+            spec = restyled(spec, self.restyle.get(key))
         st = dict(self.styles[spec['стиль']])
         st.update(spec.get('правки', {}))
         if tried:
@@ -626,15 +654,104 @@ class Editor(tk.Toplevel):
         self._look_status()
         self._schedule(0)
 
+    # ------------------------------------------------------- стиль напису
+    def _pickers_refresh(self):
+        names = atl.game_styles(self.styles, self.game)
+        for _sf, _var, pick, _b in self.style_rows:
+            pick.refresh(self.styles, names)
+
+    def _style_rows_show(self):
+        """Стиль кожного варіанта (з пробною зміною) — у його рядку прев'ю."""
+        vs = variants(self.marks, self.cur) if self.cur else []
+        was, self._loading = getattr(self, '_loading', False), True
+        try:
+            for k, (sf, var, _pick, b_own) in enumerate(self.style_rows):
+                if k >= len(vs):
+                    sf.grid_remove()
+                    continue
+                name = restyled(vs[k][2], self.restyle.get(self.cur))['стиль']
+                var.set(name)
+                b_own.state(['!disabled'] if self.styles.get(name, {}).get('мій') else ['disabled'])
+                sf.grid()
+        finally:
+            self._loading = was
+
+    def _restyle(self, k):
+        """Вибрано інший стиль для варіанта k: пробна зміна (для всіх кадрів напису з тим
+        самим стилем у розмітці), доки не «Записати в розмітку»."""
+        if getattr(self, '_loading', False) or not self.cur:
+            return
+        vs = variants(self.marks, self.cur)
+        if k >= len(vs):
+            return
+        old, new = vs[k][2]['стиль'], self.style_rows[k][1].get()
+        m = dict(self.restyle.get(self.cur) or {})
+        if new == old or new not in self.styles:
+            m.pop(old, None)
+        else:
+            m[old] = new
+        if m:
+            self.restyle[self.cur] = m
+        else:
+            self.restyle.pop(self.cur, None)
+        self._paint_refresh()
+        self._look_status()
+        self._style_rows_show()
+        self._schedule(0)
+
+    def _edit_style(self, k, edit):
+        from textscan_window import StyleEditor
+        vs = variants(self.marks, self.cur) if self.cur else []
+        if k >= len(vs):
+            return
+        self.style_row = k                       # з якого варіанта відкрито редактор
+        StyleEditor(self, self.style_rows[k][1].get(), edit)
+
+    def style_sample(self):
+        """Для редактора стилю: (атлас, кадр, spec, [англ., переклад]) варіанта, з якого відкрито."""
+        vs = variants(self.marks, self.cur) if self.cur else []
+        k = getattr(self, 'style_row', 0)
+        if k >= len(vs):
+            return None
+        src, i, spec = vs[k]
+        # без пробного шрифту й «справжніх літер» — інакше не видно самого стилю
+        spec = tuned(restyled(spec, self.restyle.get(self.cur)), None, False)
+        img, boxes = self.atlases.get(src, self.marks[src])
+        r = next(x for x in self.rows if x['id'] == self.cur)
+        texts = [r['src'], self.text.get().strip() or None]
+        if self.game == 'nep':
+            from neptunia import atlas as natl
+            texts = [t and natl.text_for(spec, t) for t in texts]
+        return img, tuple(atl.box_of(i, spec, boxes)), spec, texts
+
+    def styles_changed(self, chosen=None):
+        """Свій стиль збережено чи видалено (редактор стилю): перечитати стилі; `chosen` —
+        пробно для варіанта, з якого відкривали редактор."""
+        self.styles = atl.load_styles()
+        for key, m in list(self.restyle.items()):         # видалений стиль — прибрати й звідси
+            m = {a: b for a, b in m.items() if b in self.styles}
+            if m:
+                self.restyle[key] = m
+            else:
+                self.restyle.pop(key)
+        self._pickers_refresh()
+        if chosen and self.cur:
+            self.style_rows[getattr(self, 'style_row', 0)][1].set(chosen)      # -> _restyle
+        self._paint_refresh()
+        self._look_status()
+        self._style_rows_show()
+        self._schedule(0)
+
     def _marked_real(self, key):
         return any(s.get('літери з оригіналу') for _src, _i, s in variants(self.marks, key))
 
     def _look_status(self):
         key = self.cur
-        changed = key in self.suggest or self.real.get() != self._marked_real(key)
+        changed = key in self.suggest or key in self.restyle or self.real.get() != self._marked_real(key)
         self.b_apply.state(['!disabled'] if changed else ['disabled'])
-        if key in self.suggest:
-            e, parts = self.suggest[key], []
+        if key in self.suggest or key in self.restyle:
+            e, parts = self.suggest.get(key) or {}, []
+            parts += [f'стиль {a} → {b}' for a, b in (self.restyle.get(key) or {}).items()]
             if 'шрифт' in e:
                 var = e.get('варіація') or {}
                 parts.append(f'шрифт {e["шрифт"]}' +
@@ -695,6 +812,7 @@ class Editor(tk.Toplevel):
         повернути там правки стилю, що були до нього."""
         key = self.cur
         self.suggest.pop(key, None)
+        self.restyle.pop(key, None)
         mod, marks = self._markup()
         n = 0
         for src, mark in marks.items():
@@ -762,6 +880,7 @@ class Editor(tk.Toplevel):
         key = self.cur
         mod, marks = self._markup()
         edit, real, n = self.suggest.get(key), self.real.get(), 0
+        restyle = self.restyle.get(key)
         for src, mark in marks.items():
             if src.startswith('_'):
                 continue
@@ -770,13 +889,14 @@ class Editor(tk.Toplevel):
                     continue
                 if edit and 'правки до шрифту' not in spec:
                     spec = dict(spec, **{'правки до шрифту': spec.get('правки')})
-                mark['кадри'][i] = tuned(spec, edit, real)
+                mark['кадри'][i] = tuned(restyled(spec, restyle), edit, real)
                 n += 1
         mod.save_marks(marks)
-        if edit:
+        if edit and 'шрифт' in edit:
             from maryskelter import fontlib
             fontlib.adopt(edit['шрифт'])
         self.suggest.pop(key, None)
+        self.restyle.pop(key, None)
         self.marks = {k: v for k, v in marks.items() if not k.startswith('_')}
         self._look_status()
         self.look.set(f'Записано в розмітку: кадрів {n}.')
@@ -805,6 +925,7 @@ class FontGallery(tk.Toplevel):
         from maryskelter import fontlib
         self.ed, self.key = editor, key
         self.src, self.i, self.spec = variants(editor.marks, key)[0]
+        self.spec = restyled(self.spec, editor.restyle.get(key))     # пробний стиль — теж
         st = dict(editor.styles[self.spec['стиль']])
         st.update(self.spec.get('правки', {}))
         st.update(editor.suggest.get(key) or {})

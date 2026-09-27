@@ -28,6 +28,28 @@ MODES = {'рядки': 'кнопка / плашка з однорідним тл
 KEEP = ('правки', 'правки до шрифту', 'літери з оригіналу', 'кегль', 'вирівняти', 'ключ', 'приклад')
 
 
+class StylePicker(ttk.Menubutton):
+    """Вибір стилю: меню з підменю за групами стилів (atl.style_groups); свої — з ★."""
+
+    def __init__(self, parent, var, **kw):
+        super().__init__(parent, textvariable=var, **kw)
+        self.var = var
+        self.menu = tk.Menu(self, tearoff=False)
+        self['menu'] = self.menu
+
+    def refresh(self, styles, names):
+        m = self.menu
+        m.delete(0, 'end')
+        groups = atl.style_groups(styles, names)
+        for group, ns in groups:
+            sub = m if len(groups) == 1 else tk.Menu(m, tearoff=False)
+            for n in ns:
+                sub.add_radiobutton(label=n + ('  ★' if styles[n].get('мій') else ''), value=n,
+                                    variable=self.var)
+            if sub is not m:
+                m.add_cascade(label=f'{group}  ({len(ns)})', menu=sub)
+
+
 class TextScan(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app)
@@ -154,7 +176,8 @@ class TextScan(tk.Toplevel):
         self.style = tk.StringVar()
         srow = ttk.Frame(right)
         srow.pack(fill='x')
-        cb = ttk.Combobox(srow, textvariable=self.style, values=self.style_names, state='readonly')
+        cb = StylePicker(srow, self.style)
+        cb.refresh(self.styles, self.style_names)
         cb.pack(side='left', fill='x', expand=True)
         self.b_styles = ttk.Button(srow, text='Усі стилі…', command=self._gallery)
         self.b_styles.pack(side='left', padx=(6, 0))
@@ -204,7 +227,7 @@ class TextScan(tk.Toplevel):
     def _enable(self, on):
         for b in (self.b_ok, self.b_no, self.b_styles, self.b_new_style, self.e_text, *self.radios):
             b.state(['!disabled'] if on else ['disabled'])
-        self.style_cb.state(['readonly', '!disabled'] if on else ['disabled'])
+        self.style_cb.state(['!disabled'] if on else ['disabled'])
         self.b_revoke.state(['!disabled'] if getattr(self, 'sel_done', None) is not None else ['disabled'])
         self._own_state()
 
@@ -215,12 +238,9 @@ class TextScan(tk.Toplevel):
     # ------------------------------------------------------------------ свої стилі
     def _style_list(self):
         """Стилі цієї гри: основні (у Neptunia — з префіксом «неп-») і свої, створені для неї."""
-        nep = self.game == 'nep'
-        self.style_names = sorted(
-            k for k, v in self.styles.items() if not k.startswith('_') and
-            ((v.get('гра') == self.game) if v.get('мій') else (k.startswith('неп-') == nep)))
+        self.style_names = atl.game_styles(self.styles, self.game)
         if hasattr(self, 'style_cb'):
-            self.style_cb.configure(values=self.style_names)
+            self.style_cb.refresh(self.styles, self.style_names)
 
     def _own_state(self):
         own = bool(self.styles.get(self.style.get(), {}).get('мій'))
@@ -230,6 +250,14 @@ class TextScan(tk.Toplevel):
     def _edit_style(self, edit):
         if self.sel is not None:
             StyleEditor(self, self.style.get(), edit)
+
+    def style_sample(self):
+        """Для редактора стилю: (картинка, кадр, spec, [англ. текст, укр. текст|None]) вибраного
+        напису або None."""
+        if self.sel is None or self.img is None:
+            return None
+        key, spec = self._spec()
+        return self.img, tuple(atl.box_of(key, spec, self.frames)), spec, [spec['текст'], None]
 
     def styles_changed(self, chosen=None):
         """Свої стилі змінились (редактор): перечитати й, якщо треба, вибрати `chosen`."""
@@ -861,7 +889,10 @@ class StyleGallery(tk.Toplevel):
         self.styles = scan.styles
         used = collections.Counter(s.get('стиль') for m in scan._marks().values()
                                    for s in m.get('кадри', {}).values())
-        self.names = sorted(scan.style_names, key=lambda n: (-used.get(n, 0), n))
+        # за групами; у групі — уживані в грі першими
+        self.groups = [(g, sorted(ns, key=lambda n: -used.get(n, 0)))
+                       for g, ns in atl.style_groups(scan.styles, scan.style_names)]
+        self.names = [n for _g, ns in self.groups for n in ns]
         self.sel = self.names.index(scan.style.get()) if scan.style.get() in self.names else 0
         self.q = queue.Queue()
         self.photos = {}
@@ -876,7 +907,8 @@ class StyleGallery(tk.Toplevel):
         ttk.Label(top, text='Оригінал:').pack(side='left', anchor='n')
         self.orig_ph = self._photo(self.img.crop(box))
         tk.Label(top, image=self.orig_ph, bg='#181020', bd=0).pack(side='left', padx=8)
-        ttk.Label(top, text='Клік — вибрати, подвійний клік — взяти. Перші — стилі, які вже є в грі.',
+        ttk.Label(top, text='Клік — вибрати, подвійний клік — взяти. Стилі — за групами, у групі '
+                            'перші — ті, що вже є в грі.',
                   style='Hint.TLabel').pack(side='left', padx=8)
 
         body = ttk.Frame(self)
@@ -891,10 +923,20 @@ class StyleGallery(tk.Toplevel):
         self.inner.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
         self.bind('<MouseWheel>', self._wheel)
         self.cards = []
+        place, row = [], 0                  # (рядок, стовпчик) кожної картки; заголовок групи — свій рядок
+        for group, ns in self.groups:
+            if len(self.groups) > 1:
+                tk.Label(self.inner, text=group, bg='#221b2b', fg='#c8a8ff', anchor='w',
+                         font=('Segoe UI', 11, 'bold')).grid(row=row, column=0, columnspan=self.COLS,
+                                                              sticky='w', padx=4, pady=(10, 0))
+                row += 1
+            for j in range(len(ns)):
+                place.append((row + j // self.COLS, j % self.COLS))
+            row += (len(ns) + self.COLS - 1) // self.COLS
         for k, name in enumerate(self.names):
             card = tk.Frame(self.inner, bg='#221b2b', highlightthickness=2, highlightbackground='#221b2b',
                             padx=6, pady=4)
-            card.grid(row=k // self.COLS, column=k % self.COLS, sticky='nw', padx=4, pady=4)
+            card.grid(row=place[k][0], column=place[k][1], sticky='nw', padx=4, pady=4)
             mine = self.styles.get(name, {}).get('мій')
             lab = tk.Label(card, text=name + ('  ★ мій' if mine else ''), bg='#221b2b',
                            fg='#ffd970' if mine else '#eeeeee', anchor='w', font=('Segoe UI', 9))
@@ -982,7 +1024,10 @@ class StyleEditor(tk.Toplevel):
     """Свій стиль перекладача: за основу — вибраний стиль, змінюються шрифт, товщина,
     колір (чи градієнт), обведення, тінь, нахил, поворот, розрядка й квадратність; решта
     ключів основи (сяйво, друге обведення, розтяг…) переходить як є. Прев'ю — на вибраному
-    місці картинки. Зберігається в атлас/стилі.мої.json (atl.save_user_style)."""
+    місці картинки. Зберігається в атлас/стилі.мої.json (atl.save_user_style).
+
+    `scan` — вікно, з якого відкрито («Знайти написи» чи «Написи на картинках»): має
+    styles, game, name (файл розмітки), style_sample() і styles_changed(chosen)."""
 
     SAMPLE = 'Приклад Їжак'
 
@@ -1026,6 +1071,13 @@ class StyleEditor(tk.Toplevel):
         if not self.edit:
             self.st.pop('опис', None)
         row('Опис:', ttk.Entry(f, textvariable=self.desc, width=30))
+        # група — щоб свої стилі не губились у списку; можна вписати нову
+        groups = [g for g, _ns in atl.style_groups(self.scan.styles,
+                                                    atl.game_styles(self.scan.styles, self.scan.game))]
+        if atl.MY_GROUP not in groups:
+            groups.append(atl.MY_GROUP)
+        self.group = tk.StringVar(value=(st.get('група') or atl.MY_GROUP) if self.edit else atl.MY_GROUP)
+        row('Група:', ttk.Combobox(f, textvariable=self.group, values=groups, width=28))
 
         self.font = tk.StringVar(value=st.get('шрифт', ''))
         cb = ttk.Combobox(f, textvariable=self.font, values=[fn for _d, fn in self.fonts],
@@ -1186,6 +1238,7 @@ class StyleEditor(tk.Toplevel):
                 st[key] = val
         if self.desc.get().strip():
             st['опис'] = self.desc.get().strip()
+        st['група'] = self.group.get().strip() or atl.MY_GROUP
         st['гра'] = self.scan.game
         return st
 
@@ -1196,19 +1249,20 @@ class StyleEditor(tk.Toplevel):
 
     def _render(self):
         self.pending = None
-        scan = self.scan
-        if scan.sel is None or scan.img is None:
+        sample = self.scan.style_sample()
+        if sample is None:
             return
         self.gen += 1
-        gen, st, (_k, spec), img = self.gen, self.style(), scan._spec(), scan.img
-        styles = dict(scan.styles, __пробний=st)
+        img, box, spec, texts = sample
+        gen, st = self.gen, self.style()
+        styles = dict(self.scan.styles, __пробний=st)
         spec = dict(spec, стиль='__пробний')
+        texts = [t or self.SAMPLE for t in texts]
 
         def work():
-            box = tuple(spec['рамка'])
             out = [img.crop(box)]
             warn = []
-            for text in (spec['текст'], self.SAMPLE):
+            for text in texts:
                 try:
                     im = img.copy()
                     warn += atl.draw(im, box, spec, styles, text)
