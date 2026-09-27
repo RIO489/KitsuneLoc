@@ -719,27 +719,32 @@ def _export_atlas(a):
 
 def _import_atlas(a):
     """Перемалювати атласи за перекладом. Повертає {архів: {файл: байти CL3}}."""
+    import pics
     doc = locfile.load_doc(a.work_dir, ATLAS_SRC)
-    if not doc:
-        return {}
     # порожньо або те саме, що в оригіналі, — спрайт лишається як був
-    tr = {e['id']: e['tr'] for e in doc['entries'] if e.get('tr') and e['tr'] != e['src']}
+    tr = {e['id']: e['tr'] for e in (doc or {}).get('entries', []) if e.get('tr') and e['tr'] != e['src']}
     marks = _atlas_marks()
+    # свої картинки перекладача (Переклад\<гра>\Свої картинки) — лише з архівів .bra
+    own = {s: v for s, v in pics.found(getattr(a, 'pics_dir', None)).items()
+           if s.split('/', 1)[0].lower().endswith('.bra')}
     todo = [s for s, m in marks.items() if any(atl.key_of(x) in tr for x in m['кадри'].values())]
+    todo += [s for s in own if s not in todo]
     if not todo:
         return {}
     styles = atl.load_styles()
     out, n, warns = {}, 0, []
     for src, blob in _read_atlases(a, todo).items():
-        new, k, w = atl.cached(src, blob, marks[src], tr, styles, atl.rebuild)
-        warns += [f'{marks[src].get("назва", src)}, {x}' for x in w]
+        mark = marks.get(src) or {'кадри': {}}
+        new, k, w = atl.cached(src, blob, mark, tr, styles, atl.rebuild, own.get(src))
+        warns += [f'{mark.get("назва", src)}, {x}' for x in w]
         if new:
             arc, name = _atlas_path(src)
             out.setdefault(arc, {})[name] = new
             n += k
     for w in warns[:30]:
         print('  !', w)
-    print(f'  написи на картинках: {n} спрайтів у {len(todo)} атласах')
+    print(f'  написи на картинках: {n} спрайтів у {len(todo)} атласах' +
+          (f', своїх картинок: {sum(len(v) for v in own.values())}' if own else ''))
     return out
 
 

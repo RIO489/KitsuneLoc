@@ -1040,29 +1040,47 @@ def key_of(spec):
     return spec.get('ключ') or ' '.join(spec['текст'].split())
 
 
-def rebuild(blob, mark, tr, styles):
+def rebuild(blob, mark, tr, styles, base=None):
     """Перемалювати написи одного атласу. `mark` — розмітка атласу з
-    написи.json, `tr` — {ключ: переклад}. Повертає (нові байти CL3 | None,
+    написи.json, `tr` — {ключ: переклад}, `base` — свої картинки перекладача
+    {текстура ('' — єдина в атласі): шлях до PNG} (pics.py): вони стають оригіналом
+    текстури, написи малюються поверх. Повертає (нові байти CL3 | None,
     к-сть написів, [попередження])."""
     from . import dds
+    import pics
+    base = base or {}
     todo = [(i, s) for i, s in mark['кадри'].items() if tr.get(key_of(s))]
-    if not todo:
+    if not todo and not base:
         return None, 0, []
     cl3 = container(blob)
-    _ti, tid_f = pair(cl3, mark.get('текстура'))
-    boxes = frames(cl3, mark.get('текстура'))
-    data = bytes(tid_f[1])
-    img = dds.decode(data)
-    warns, rects = [], []
-    for i, spec in sorted(todo, key=order):
-        box = box_of(i, spec, boxes)
-        if box is None:
-            warns.append(f'кадру {i} немає в нарізці')
-            continue
-        warns += [f'кадр {i}: {w}' for w in draw(img, box, spec, styles, tr[key_of(spec)])]
-        rects.append(box)
-    cl3.replace(tid_f[0], dds.patch(data, img, rects))
-    return cl3.build(), len(rects), warns
+    mstem = mark.get('текстура') or ''
+    warns, n, changed = [], 0, False
+    for stem in sorted(set(base) | ({mstem} if todo else set())):
+        _ti, tid_f = pair(cl3, stem or None)
+        data = bytes(tid_f[1])
+        img = orig = dds.decode(data)
+        rects = []
+        if stem in base:
+            try:
+                img = pics.load(base[stem], orig)
+                rects += pics.changed_rects(orig, img)
+            except (OSError, ValueError) as ex:
+                warns.append(f'своя картинка: {ex}')
+        if stem == mstem and todo:
+            img = img.copy()
+            boxes = frames(cl3, stem or None)
+            for i, spec in sorted(todo, key=order):
+                box = box_of(i, spec, boxes)
+                if box is None:
+                    warns.append(f'кадру {i} немає в нарізці')
+                    continue
+                warns += [f'кадр {i}: {w}' for w in draw(img, box, spec, styles, tr[key_of(spec)])]
+                rects.append(box)
+                n += 1
+        if rects:
+            cl3.replace(tid_f[0], dds.patch(data, img, rects))
+            changed = True
+    return (cl3.build() if changed else None), n, warns
 
 
 # ------------------------------------------------------------ кеш атласів
@@ -1093,7 +1111,7 @@ def _env_sig():
     вони в ключі кожного атласа, лише ті, якими він малюється)."""
     parts = []
     for d, ext in ((os.path.join(HERE, 'maryskelter'), '.py'), (os.path.join(HERE, 'neptunia'), '.py'),
-                   (os.path.join(DIR, 'тло'), '')):
+                   (os.path.join(DIR, 'тло'), ''), (HERE, 'pics.py')):
         try:
             for fn in sorted(os.listdir(d)):
                 p = os.path.join(d, fn)
@@ -1124,15 +1142,17 @@ def _used_styles(mark, styles):
     return used, {f: _file_sig(_font_path({'шрифт': f})) for f in sorted(fonts)}
 
 
-def cached(src, blob, mark, tr, styles, fn):
-    """fn(blob, mark, tr, styles) з кешем у кеш/атласи/: атлас, у якому не
+def cached(src, blob, mark, tr, styles, fn, base=None):
+    """fn(blob, mark, tr, styles[, base]) з кешем у кеш/атласи/: атлас, у якому не
     змінилось нічого (оригінал, розмітка, переклад його написів, ужиті ним стилі
-    й шрифти, код), не перемальовуємо — малювання дає ті самі байти, а коштує секунди."""
+    й шрифти, свої картинки перекладача `base`, код), не перемальовуємо — малювання
+    дає ті самі байти, а коштує секунди."""
     import hashlib, pickle
     keys = sorted({key_of(s) for s in mark['кадри'].values()})
     h = hashlib.md5(_env_sig().encode('utf-8'))
     h.update(hashlib.md5(blob).digest())
-    h.update(json.dumps([mark, {k: tr[k] for k in keys if k in tr}, *_used_styles(mark, styles)],
+    h.update(json.dumps([mark, {k: tr[k] for k in keys if k in tr}, *_used_styles(mark, styles),
+                         {k: _file_sig(p) for k, p in (base or {}).items()}],
                         sort_keys=True, ensure_ascii=False).encode('utf-8'))
     key = h.hexdigest()
     path = os.path.join(CACHE_DIR, hashlib.md5(src.encode('utf-8')).hexdigest() + '.pickle')
@@ -1143,7 +1163,7 @@ def cached(src, blob, mark, tr, styles, fn):
             return res
     except Exception:
         pass
-    res = fn(blob, mark, tr, styles)
+    res = fn(blob, mark, tr, styles, base) if base else fn(blob, mark, tr, styles)
     try:
         os.makedirs(CACHE_DIR, exist_ok=True)
         with open(path + '.tmp', 'wb') as f:

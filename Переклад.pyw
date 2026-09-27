@@ -991,6 +991,7 @@ class App(tk.Tk):
         shutil.rmtree(out, ignore_errors=True)
         ns = type('a', (), {})()
         ns.work_dir, ns.out_dir, ns.orig_dir = work, out, bk
+        ns.pics_dir = xl                # свої картинки перекладача: <xl>\Свої картинки (pics.py)
         if g == 'msk':
             import translate_msk as t
             ns.game_dir = self.root_dir()

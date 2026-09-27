@@ -437,26 +437,31 @@ def _import_atlas(a):
     """Перемалювати текстури за перекладом. -> {архів: {файл: байти .tid}}."""
     from neptunia import atlas as natl
     from maryskelter import atlas as atl
+    import pics
     doc = locfile.load_doc(a.work_dir, ATLAS_SRC)
-    if not doc:
-        return {}
-    tr = {e['id']: e['tr'] for e in doc['entries'] if e.get('tr') and e['tr'] != e['src']}
+    tr = {e['id']: e['tr'] for e in (doc or {}).get('entries', []) if e.get('tr') and e['tr'] != e['src']}
     marks = natl.load_marks()
+    # свої картинки перекладача (Переклад\<гра>\Свої картинки) — лише .tid з архівів .pac
+    own = {s: v for s, v in pics.found(getattr(a, 'pics_dir', None)).items()
+           if '.pac/' in s.lower() and s.lower().endswith('.tid')}
     todo = [s for s, m in marks.items() if any(atl.key_of(x) in tr for x in m['кадри'].values())]
+    todo += [s for s in own if s not in todo]
     if not todo:
         return {}
     styles = atl.load_styles()
     out, n, warns = {}, 0, []
     for src, blob in _atlas_blobs(a, todo).items():
-        new, k, w = atl.cached(src, blob, marks[src], tr, styles, natl.rebuild)
-        warns += [f'{marks[src].get("назва", src)}, {x}' for x in w]
+        mark = marks.get(src) or {'кадри': {}}
+        new, k, w = atl.cached(src, blob, mark, tr, styles, natl.rebuild, own.get(src))
+        warns += [f'{mark.get("назва", src)}, {x}' for x in w]
         if new:
             arc, inner = natl.split_src(src)
             out.setdefault(arc, {})[inner.replace('/', '\\')] = new
             n += k
     for w in warns[:30]:
         print('  !', w)
-    print(f'  написи на картинках: {n} спрайтів у {len(todo)} текстурах')
+    print(f'  написи на картинках: {n} спрайтів у {len(todo)} текстурах' +
+          (f', своїх картинок: {len(own)}' if own else ''))
     return out
 
 

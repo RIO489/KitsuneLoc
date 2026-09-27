@@ -48,8 +48,10 @@ class Textures:
         return next((os.path.join(d, *arc.split('/')) for d in self.dirs
                      if os.path.exists(os.path.join(d, *arc.split('/')))), None)
 
-    def list(self):
-        """[джерело]: 'TTM3.bra/TEXTURE/…/x.CL3' | 'data/GAME00000.pac/…/x.tid'."""
+    def list(self, everything=False):
+        """[джерело]: 'TTM3.bra/TEXTURE/…/x.CL3' | 'data/GAME00000.pac/…/x.tid'.
+        everything — і те, де тексту для розпізнавання немає (арти, новели, портрети, моделі):
+        для своїх картинок перекладача (pics.py)."""
         out = []
         if self.game == 'msk':
             from maryskelter.bra import Bra
@@ -58,14 +60,14 @@ class Textures:
                 if not p:
                     continue
                 for e in Bra(p).entries:
-                    if e.name.lower().endswith(('.cl3', '.dds')) and not MSK_SKIP.search(e.name):
+                    if e.name.lower().endswith(('.cl3', '.dds')) and (everything or not MSK_SKIP.search(e.name)):
                         out.append(arc + '/' + e.name.replace('\\', '/'))
         else:
             import translate_nep as tn
             for arc in tn.archives(self.game_dir):
                 for e in self._pac(arc).entries:
                     n = e.name.replace('\\', '/')
-                    if n.lower().endswith('.tid') and not NEP_SKIP.search(n):
+                    if n.lower().endswith('.tid') and (everything or not NEP_SKIP.search(n)):
                         out.append(arc + '/' + n)
         return out
 

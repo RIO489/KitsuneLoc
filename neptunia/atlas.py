@@ -54,20 +54,32 @@ def text_for(spec, tr):
     return tr
 
 
-def rebuild(blob, mark, tr, styles):
-    """Перемалювати написи однієї текстури. -> (байти .tid | None, к-сть, [попередження])."""
+def rebuild(blob, mark, tr, styles, base=None):
+    """Перемалювати написи однієї текстури. `base` — {'': шлях до своєї картинки
+    перекладача} (pics.py): вона стає оригіналом, написи — поверх.
+    -> (байти .tid | None, к-сть, [попередження])."""
+    import pics
     todo = [(k, s) for k, s in mark['кадри'].items() if tr.get(atl.key_of(s))]
-    if not todo:
+    if not todo and not base:
         return None, 0, []
     t = Tid(blob)
     img = t.image()
     warns, rects = [], []
+    if base:
+        try:
+            orig, img = img, pics.load(next(iter(base.values())), img)
+            rects += pics.changed_rects(orig, img)
+        except (OSError, ValueError) as ex:
+            warns.append(f'своя картинка: {ex}')
+    n = len(rects)
     for k, spec in sorted(todo, key=atl.order):
         box = tuple(spec['рамка'])
         text = text_for(spec, tr[atl.key_of(spec)])
         warns += [f'{k}: {w}' for w in atl.draw(img, box, spec, styles, text)]
         rects.append(box)
-    return t.patch(img, rects), len(rects), warns
+    if not rects:
+        return None, 0, warns
+    return t.patch(img, rects), len(rects) - n, warns
 
 
 def sprite(blob, spec):

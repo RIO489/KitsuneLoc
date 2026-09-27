@@ -9,12 +9,13 @@
 живим прев'ю; «Прийняти» записує кадр у розмітку перекладача (атлас/*.мої.json),
 після «1» напис з'являється в книзі написів і в редакторі.
 """
-import os, queue, threading
+import os, queue, subprocess, threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, filedialog
 
 from PIL import Image, ImageTk
 
+import pics
 import textscan
 from maryskelter import atlas as atl
 
@@ -54,7 +55,7 @@ class TextScan(tk.Toplevel):
     def __init__(self, app):
         super().__init__(app)
         self.app = app
-        work, _xl, _out, bk = app.dirs()
+        work, self.xl, _out, bk = app.dirs()
         self.game = app.cur['game']
         if self.game not in textscan.MARKS:
             self.destroy()
@@ -83,6 +84,7 @@ class TextScan(tk.Toplevel):
         self.geometry('1320x800')
         self.minsize(1000, 600)
         self._build()
+        self._pic_state()
         self._fill()
         self.after(60, self._poll)
         # Delete / BackSpace — прибрати вибрану рамку; але не коли набираєш текст у полі
@@ -99,6 +101,11 @@ class TextScan(tk.Toplevel):
         self.all_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(top, text='Показати всі текстури', variable=self.all_var,
                         command=self._fill).pack(side='left', padx=12)
+        # арти, новели, портрети тексту для розпізнавання не мають — але свою картинку
+        # для них зробити можна
+        self.art_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='і арти, новели, портрети', variable=self.art_var,
+                        command=self._fill).pack(side='left')
         self.status = tk.StringVar()
         ttk.Label(top, textvariable=self.status, style='Hint.TLabel').pack(side='left', padx=8)
         self.pbar = ttk.Progressbar(top, length=200, mode='determinate')
@@ -136,6 +143,22 @@ class TextScan(tk.Toplevel):
         ttk.Label(bar, text='Ctrl + коліщатко — масштаб, права кнопка — тягнути картинку. Ліва по порожньому — '
                             'нова рамка; Delete / BackSpace — прибрати рамку. Зелене — розмічено, жовте — знайдено.',
                   style='Hint.TLabel', wraplength=560).pack(side='left', padx=8)
+        # своя картинка: вивантажити оригінал у PNG, перемалювати деінде й завантажити назад
+        own = ttk.Frame(mid)
+        own.pack(fill='x', pady=(4, 2))
+        ttk.Label(own, text='Своя картинка:').pack(side='left')
+        self.b_pic_out = ttk.Button(own, text='Вивантажити оригінал', command=self._pic_export)
+        self.b_pic_out.pack(side='left', padx=(6, 0))
+        self.b_pic_in = ttk.Button(own, text='Завантажити свою…', command=self._pic_import)
+        self.b_pic_in.pack(side='left', padx=4)
+        self.b_pic_rm = ttk.Button(own, text='Прибрати свою', command=self._pic_remove)
+        self.b_pic_rm.pack(side='left')
+        self.show_own = tk.BooleanVar(value=False)
+        self.c_pic_show = ttk.Checkbutton(own, text='показувати свою', variable=self.show_own,
+                                          command=self._pic_show)
+        self.c_pic_show.pack(side='left', padx=8)
+        self.pic_state = tk.StringVar()
+        ttk.Label(own, textvariable=self.pic_state, style='Hint.TLabel').pack(side='left', padx=4)
         cv = ttk.Frame(mid)
         cv.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(cv, bg='#181020', highlightthickness=0, cursor='crosshair')
@@ -235,6 +258,105 @@ class TextScan(tk.Toplevel):
         if self.sel is not None:
             StyleGallery(self)
 
+    # ------------------------------------------------------------------ своя картинка
+    def _pic_path(self, existing=False):
+        """Шлях до своєї картинки поточної текстури (pics.py); existing — None, якщо файла ще немає."""
+        if not self.cur:
+            return None
+        src, stem = self.cur
+        p = os.path.join(pics.folder(self.xl), pics.name_of(src, stem if self.multi else ''))
+        return p if not existing or os.path.exists(p) else None
+
+    def _pic_state(self):
+        on = self.cur is not None
+        have = bool(self._pic_path(existing=True))
+        self.b_pic_out.state(['!disabled'] if on else ['disabled'])
+        self.b_pic_in.state(['!disabled'] if on else ['disabled'])
+        self.b_pic_rm.state(['!disabled'] if have else ['disabled'])
+        self.c_pic_show.state(['!disabled'] if have else ['disabled'])
+        self.pic_state.set('є твоя — у грі буде вона (написи — поверх)' if have else
+                           ('немає, у грі — оригінал' if on else ''))
+
+    def _pic_show(self, fit=True):
+        """Показувати на полотні свою картинку чи оригінал (розмітка й прев'ю — завжди з оригіналу)."""
+        if self.img is None:
+            return
+        im = self.img
+        p = self._pic_path(existing=True)
+        if self.show_own.get() and p:
+            try:
+                im = pics.load(p, self.img)
+            except (OSError, ValueError) as ex:
+                self.pic_state.set(f'не вдалося відкрити свою: {ex}')
+        bg = Image.new('RGBA', im.size, BG)
+        bg.alpha_composite(im)
+        self.flat = bg.convert('RGB')
+        if fit:
+            self._redraw(image=True)
+
+    def _pic_export(self):
+        """Чистий оригінал текстури — у PNG у «Свої картинки»; тека відкривається з вибраним файлом."""
+        p = self._pic_path()
+        if p is None:
+            return
+        if os.path.exists(p) and not messagebox.askyesno(
+                'Своя картинка', 'Для цієї текстури вже є твоя картинка:\n' + os.path.basename(p) +
+                '\n\nПереписати її оригіналом? Твої зміни в ній пропадуть.', parent=self):
+            return
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        self.img.save(p)
+        self._pic_state()
+        self._fill_keep()
+        self.status.set(f'Оригінал вивантажено: {p}. Перемалюй його (розмір не міняй, прозорість '
+                        'збережи) і збережи поверх — або «Завантажити свою…».')
+        try:
+            subprocess.Popen(['explorer', '/select,', os.path.normpath(p)])
+        except OSError:
+            pass
+
+    def _pic_import(self):
+        p = self._pic_path()
+        if p is None:
+            return
+        fn = filedialog.askopenfilename(parent=self, title='Своя картинка для цієї текстури',
+                                        filetypes=[('Картинки', '*.png *.tga *.bmp *.webp'), ('Усі', '*.*')])
+        if not fn:
+            return
+        try:
+            im = pics.load(fn, self.img)
+        except (OSError, ValueError) as ex:
+            messagebox.showerror('Своя картинка', f'Не підходить: {ex}', parent=self)
+            return
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        if os.path.abspath(fn) != os.path.abspath(p):
+            im.save(p)
+        n = len(pics.changed_rects(self.img, im))
+        self.show_own.set(True)
+        self._pic_state()
+        self._pic_show()
+        self._fill_keep()
+        self.status.set('Свою картинку завантажено' + ('' if n else ' — але вона така сама, як оригінал') +
+                        '. У гру піде після «2. Залити переклад у гру».')
+
+    def _pic_remove(self):
+        p = self._pic_path(existing=True)
+        if not p or not messagebox.askyesno('Своя картинка', 'Прибрати свою картинку? У грі знову буде '
+                                            'оригінал.\n\n' + os.path.basename(p), parent=self):
+            return
+        os.remove(p)
+        self.show_own.set(False)
+        self._pic_state()
+        self._pic_show()
+        self._fill_keep()
+
+    def _fill_keep(self):
+        """Оновити список (позначка ✎), не втрачаючи вибраної текстури."""
+        s = self.tree.selection()
+        self._fill()
+        if s and self.tree.exists(s[0]):
+            self.tree.selection_set(s[0])       # _open ту саму текстуру не перевідкриває
+            self.tree.see(s[0])
+
     # ------------------------------------------------------------------ свої стилі
     def _style_list(self):
         """Стилі цієї гри: основні (у Neptunia — з префіксом «неп-») і свої, створені для неї."""
@@ -295,9 +417,11 @@ class TextScan(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
         marks = self._marks()
         srcs = set(self.found)
-        if self.all_var.get():
+        every = self.all_var.get() or self.art_var.get()
+        if every:
             srcs |= set(self._all_srcs())
-        srcs |= set(marks) if self.all_var.get() else set()
+            srcs |= set(marks)
+        own = pics.found(self.xl)
         rows = []
         if not hasattr(self, '_frames'):
             self._frames = self.tex.frames_of([s for s in self.found if self.found[s]])
@@ -311,11 +435,13 @@ class TextScan(tk.Toplevel):
                 n = sum(1 for c in lst if not any(textscan.overlap(c['рамка'], r) > 0.5 for r in rej)
                         and not any(textscan.overlap(c['рамка'], d) > 0.5 for d in done_b))
                 done = len((marks.get(src) or {}).get('кадри', {}))
-                if n or self.all_var.get():
+                if n or every:
                     rows.append((src, stem, n, done))
         rows.sort(key=lambda r: (-r[2], r[0]))
         for src, stem, n, done in rows:
             label = src.split('/', 1)[-1] + (f' [{stem}]' if stem and stem.lower() not in src.lower() else '')
+            if src in own:
+                label += '  ✎'                   # є своя картинка
             self.tree.insert('', 'end', iid=f'{src}|{stem}', text=label, values=(n or '', done or ''))
         if not rows:
             self.status.set('Натисни «Шукати написи», щоб програма знайшла кандидатів, або постав '
@@ -324,8 +450,9 @@ class TextScan(tk.Toplevel):
             self.status.set(f'Текстур у списку: {len(rows)}.')
 
     def _all_srcs(self):
-        if not hasattr(self, '_srcs'):
-            self._srcs = self.tex.list()
+        art = self.art_var.get()
+        if getattr(self, '_srcs_art', None) != art:
+            self._srcs, self._srcs_art = self.tex.list(everything=art), art
         return self._srcs
 
     # ------------------------------------------------------------------ пошук
@@ -415,8 +542,9 @@ class TextScan(tk.Toplevel):
     # ------------------------------------------------------------------ текстура
     def _open(self):
         s = self.tree.selection()
-        if not s:
+        if not s or (s[0] == getattr(self, 'cur_iid', None) and self.img is not None):
             return
+        self.cur_iid = s[0]
         src, _, stem = s[0].rpartition('|')
         try:
             parts = self.tex.load(src)
@@ -442,6 +570,9 @@ class TextScan(tk.Toplevel):
         bg = Image.new('RGBA', self.img.size, BG)
         bg.alpha_composite(self.img)
         self.flat = bg.convert('RGB')                 # текстура на темному тлі — для показу
+        self._pic_state()
+        if self.show_own.get() and self._pic_path(existing=True):
+            self._pic_show(fit=False)
         self._fit()
 
     def _z(self):
