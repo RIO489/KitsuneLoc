@@ -538,6 +538,9 @@ def erase(img, box, spec):
     if spec.get('тло') == 'клин':                   # напівпрозорий смугастий клин (кнопки сцени MSK)
         _wedge(img, box, spec)
         return
+    if spec.get('тло') == 'дуга':                   # ім'я героїні на смузі-дузі (портрет бою MSK)
+        _arc_band(img, box, spec)
+        return
     if spec.get('тло') == 'похила':                 # похила смуга: над нею — одне, у ній — інше
         s = spec['похила']
         (ta, tb), (ba, bb) = s['верх'], s['низ']       # y = a*x + b у координатах кадру
@@ -850,6 +853,92 @@ def _wedge(img, box, spec):
     frame[yy, xx, :3] = rgb.T
     frame[yy, xx, 3] = al * cov
     img.paste(Image.fromarray(np.clip(frame + 0.5, 0, 255).astype(np.uint8), 'RGBA'), (fx, fy))
+
+
+def _edge_fit(xs, ys, deg):
+    """Многочлен степеня deg через точки краю, з відкиданням викидів (літери, що
+    заходять за край)."""
+    xs, ys = np.asarray(xs, float), np.asarray(ys, float)
+    for _ in range(3):
+        p = np.polyfit(xs, ys, deg)
+        r = ys - np.polyval(p, xs)
+        keep = np.abs(r) < max(1.5, 3 * r.std())
+        xs, ys = xs[keep], ys[keep]
+    return np.polyfit(xs, ys, deg)
+
+
+def _arc_band(img, box, spec):
+    """Тло «дуга»: велике ім'я на портреті бою MSK (TTM1.bra/PC/battle_char*.CL3, кадр 1)
+    лежить на непрозорій смузі з вигнутим верхнім краєм, градієнтом зліва направо й косими
+    смужками. Літери (білі пікселі в "область" оригіналу, розширені на "запас" px — з
+    обведенням і об'ємною тінню) замінюємо відтвореною смугою: верхній край — кубічна
+    крива, нижній — пряма (далі край кадру), обидва підігнані по видимих ділянках краю
+    (похибка ~0,5 px); колір — середнє по стовпчиках (градієнт) + профіль смужок
+    (x + k·y) mod P з чистої частини смуги цього ж кадру ("смужки": [k, P] — задати, щоб не
+    шукати). Вище краю — прозорість."""
+    fx, fy = box[0], box[1]
+    F = np.asarray(img.crop(box).convert('RGBA')).astype(float)
+    h, w = F.shape[:2]
+    ax0, ay0, ax1, ay1 = spec['область']
+    white = (F[..., :3].min(axis=-1) > 150) & (F[..., 3] > 100)
+    lim = np.zeros((h, w), bool)
+    lim[ay0:ay1, ax0:ax1] = True
+    pad = spec.get('запас', 17)
+    grow = Image.fromarray(((white & lim) * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(2 * pad + 1))
+    area = (np.asarray(grow) > 127) & lim
+    near = np.asarray(Image.fromarray((area * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(7))) > 127
+    A = F[..., 3]
+    op = A > 127
+    tx, ty, bx, by = [], [], [], []
+    for x in range(w):
+        col = np.nonzero(op[:, x])[0]
+        if not len(col):
+            continue
+        y0, y1 = col[0], col[-1]
+        if y0 > 0 and not near[y0, x]:
+            tx.append(x)
+            ty.append(y0 - A[y0 - 1, x] / 255.0)          # край з точністю до частки пікселя
+        if y1 < h - 3 and not near[y1, x]:
+            bx.append(x)
+            by.append(y1 + 1 + A[y1 + 1, x] / 255.0)
+    X = np.arange(w)
+    top = np.polyval(_edge_fit(tx, ty, 3), X)
+    bot = np.minimum(np.polyval(_edge_fit(bx, by, 1), X), h + 50)   # далі низ — край кадру
+    yy, xx = np.mgrid[0:h, 0:w]
+    clean = (yy > top[None] + 2) & (yy < bot[None] - 2) & op & ~near
+    Xs, Ys = xx[clean].astype(float), yy[clean].astype(float)
+    C = F[clean][:, :3]
+    XB = 24                                                  # градієнт: середнє по смугах 24 px
+    nxb = w // XB + 1
+    xb = np.clip((Xs / XB).astype(int), 0, nxb - 1)
+    cnt = np.bincount(xb, minlength=nxb)
+    mean = np.stack([np.bincount(xb, C[:, c], nxb) for c in range(3)], 1) / np.maximum(cnt, 1)[:, None]
+    have = np.nonzero(cnt)[0]
+    for c in range(3):
+        mean[:, c] = np.interp(np.arange(nxb), have, mean[have, c])
+    R = C - mean[xb]
+    if spec.get('смужки'):                  # [k, P] відомі (однакові в усіх портретах) — без пошуку
+        k, P = spec['смужки']
+    else:                                   # пошук — на вибірці пікселів, інакше секунди на кадр
+        sub = np.random.default_rng(0).permutation(len(Xs))[:6000]
+        k, P = _stripes(R[sub], Xs[sub], Ys[sub], np.arange(-2.5, 2.5001, 0.1), np.arange(10.0, 121.0, 2.0))
+        k, P = _stripes(R[sub], Xs[sub], Ys[sub], np.arange(k - 0.12, k + 0.1201, 0.02),
+                        np.arange(max(8.0, P - 2.5), P + 2.51, 0.25))
+    PB = 32
+    pb = (((Xs + k * Ys) % P) / P * PB).astype(int) % PB
+    pc = np.bincount(pb, minlength=PB)
+    prof = np.stack([np.bincount(pb, R[:, c], PB) for c in range(3)], 1) / np.maximum(pc, 1)[:, None]
+    ay, ax = np.nonzero(area)
+    t = (ax + 0.5) / XB - 0.5
+    i0 = np.clip(np.floor(t).astype(int), 0, nxb - 1)
+    i1 = np.clip(i0 + 1, 0, nxb - 1)
+    f = np.clip(t - np.floor(t), 0, 1)[:, None]
+    ph = ((ax + k * ay) % P) / P * PB
+    j0 = np.floor(ph).astype(int) % PB
+    g = (ph - np.floor(ph))[:, None]
+    F[ay, ax, :3] = mean[i0] * (1 - f) + mean[i1] * f + prof[j0] * (1 - g) + prof[(j0 + 1) % PB] * g
+    F[ay, ax, 3] = 255 * np.clip(np.minimum(ay - top[ax] + 0.5, bot[ax] - ay + 0.5), 0, 1)
+    img.paste(Image.fromarray(np.clip(F + 0.5, 0, 255).astype(np.uint8), 'RGBA'), (fx, fy))
 
 
 def _band(orig, nx0, nx1):
