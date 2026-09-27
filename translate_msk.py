@@ -393,13 +393,12 @@ def _game_strings(g):
 def _export_game(a):
     if not os.path.exists(os.path.join(a.game_dir, GAME_ARC)):
         return 0
-    # рушій MSK усе показує в UTF-8 (шрифт шукає символи за байтами UTF-8), а японські
-    # рядки цього cp932-файлу гра не показує — тож читаємо й пишемо як UTF-8
-    g = Gbnl(Bra.read_some(_orig(a, GAME_ARC), [GAME_STR])[GAME_STR], 'utf-8')
+    # файл Shift-JIS (cp932), і гра читає його саме так (див. _import_game)
+    g = Gbnl(Bra.read_some(_orig(a, GAME_ARC), [GAME_STR])[GAME_STR])
     items = [{'id': k, 'src': t, 'kind': 'text', 'ctx': k}
              for k, (_i, _fo, t) in sorted(_game_strings(g).items())]
     locfile.save_rich(a.work_dir, 'msk', _source(GAME_ARC, GAME_STR), 'gstr', items,
-                      {'encoding': 'utf-8'})
+                      {'encoding': g.encoding})
     return len(items)
 
 
@@ -416,8 +415,21 @@ def _import_game(a, progress=None, extra=None):
     doc = locfile.load_doc(a.work_dir, _source(GAME_ARC, GAME_STR))
     n_str = 0
     if doc:
-        tr = {x['id']: chars.apply(x['tr']) for x in doc['entries'] if x.get('tr')}
-        g = Gbnl(Bra.read_some(src, [GAME_STR])[GAME_STR], 'utf-8')
+        # файл Shift-JIS, і гра читає його як Shift-JIS (перевірено: UTF-8 у грі дав
+        # кракозябри) — кирилиця в cp932 є, а і ї є ґ замінюємо схожими (SJIS_FALLBACK),
+        # як у решті Shift-JIS-файлів; chars.apply тут не годиться (ì не в cp932)
+        g = Gbnl(Bra.read_some(src, [GAME_STR])[GAME_STR])
+        tr = {}
+        for x in doc['entries']:
+            t = x.get('tr')
+            if t and not g.can_encode(t):
+                t = t.translate(SJIS_FALLBACK)
+            if t and not g.can_encode(t):
+                bad = sorted({c for c in t if not g.can_encode(c)})
+                print(f'  ! {GAME_STR} {x["id"]}: немає в {g.encoding}: {" ".join(bad)} — лишаю англійським')
+                continue
+            if t:
+                tr[x['id']] = t
         new = {(i, fo): tr[k] for k, (i, fo, t) in _game_strings(g).items()
                if tr.get(k) and tr[k] != t}
         if new:

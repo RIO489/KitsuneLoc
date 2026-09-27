@@ -382,6 +382,9 @@ def erase(img, box, spec):
     if spec.get('тло') == 'штрих':                  # похилі смужки на картці (наліпки Neptunia)
         _hatch(img, box, spec)
         return
+    if spec.get('тло') == 'клин':                   # напівпрозорий смугастий клин (кнопки сцени MSK)
+        _wedge(img, box, spec)
+        return
     if spec.get('тло') == 'похила':                 # похила смуга: над нею — одне, у ній — інше
         s = spec['похила']
         (ta, tb), (ba, bb) = s['верх'], s['низ']       # y = a*x + b у координатах кадру
@@ -628,6 +631,71 @@ def _hatch(img, box, spec):
     f = (t - np.floor(t))[None, :]
     col = prof[:, i0] * (1 - f) + prof[:, i1] * f
     frame[yy, xx] = col.T
+    img.paste(Image.fromarray(np.clip(frame + 0.5, 0, 255).astype(np.uint8), 'RGBA'), (fx, fy))
+
+
+def _stripes(C, X, Y, ks, ps):
+    """Нахил k і крок P смужок: колір залежить лише від (x + k·y) mod P."""
+    best = None
+    for k in ks:
+        u = X + k * Y
+        for P in ps:
+            b = np.floor((u % P) / P * 16).astype(int)
+            n = np.bincount(b, minlength=16)
+            s = np.array([np.bincount(b, C[:, c], 16) for c in range(3)])
+            s2 = np.array([np.bincount(b, C[:, c] ** 2, 16) for c in range(3)])
+            err = (s2 - s ** 2 / np.maximum(n, 1)).sum()
+            if best is None or err < best[0]:
+                best = (err, k, P)
+    return best[1], best[2]
+
+
+def _wedge(img, box, spec):
+    """Тло «клин»: великі STOP/SKIP/AUTO/LOG у сценах MSK (Game.bra/EVENT/parts1.dds) лежать
+    на напівпрозорому клині в косу смужку, що звужується праворуч. Під літерами його
+    відтворюємо: колір — смужки з чистого "зразок" [x0, y0, x1, y1] (координати АТЛАСУ: чистий
+    шматок праворуч від слова, поза кадром; у RGB смужки є по всій ділянці, навіть де клин
+    прозорий), прозорість — між прямими "верх"/"низ" (y = a·x + b) з лінійним спадом
+    "альфа" [[x, a], [x, a]] і згладженими краями. Змінюємо лише всередині "полігон".
+    Координати, крім "зразок", — кадру."""
+    s = spec['клин']
+    fx, fy = box[0], box[1]
+    frame = np.asarray(img.crop(box).convert('RGBA')).astype(float)
+    x0, y0, x1, y1 = s['зразок']
+    # "зразок-зсув" [dx, dy]: зразок узято з іншого, такого самого ряду (смуги рядів
+    # однакові, а довший чистий шматок є лише під найкоротшим словом)
+    sdx, sdy = s.get('зразок-зсув', [0, 0])
+    ys, xs = np.mgrid[y0:y1, x0:x1]
+    # у координатах кадру: фаза смужок має збігатися з тією, що під літерами
+    X, Y = (xs.ravel() - fx - sdx).astype(float), (ys.ravel() - fy - sdy).astype(float)
+    C = np.asarray(img.crop((x0, y0, x1, y1)).convert('RGBA')).astype(float).reshape(-1, 4)
+    # лише пікселі самої смуги: у прозорих RGB — сміття, у непрозорих — літери й тіні
+    keep = (C[:, 3] > 12) & (C[:, 3] < 245) & (C[:, :3].min(axis=1) < 200)
+    X, Y, C = X[keep], Y[keep], C[keep]
+    k, P = _stripes(C, X, Y, np.arange(-2.5, 2.5001, 0.1), np.arange(10.0, 121.0, 2.0))
+    k, P = _stripes(C, X, Y, np.arange(k - 0.12, k + 0.1201, 0.02), np.arange(max(8.0, P - 2.5), P + 2.51, 0.25))
+    B = 64
+    b = np.floor(((X + k * Y) % P) / P * B).astype(int)
+    n = np.bincount(b, minlength=B)
+    prof = np.array([np.bincount(b, C[:, c], B) for c in range(3)]) / np.maximum(n, 1)
+    have = n > 0
+    if not have.all():
+        idx = np.arange(B)
+        for c in range(3):
+            prof[c] = np.interp(idx, idx[have], prof[c][have], period=B)
+    mask = Image.new('L', (box[2] - box[0], box[3] - box[1]), 0)
+    ImageDraw.Draw(mask).polygon([tuple(p) for p in spec['полігон']], fill=255)
+    yy, xx = np.nonzero(np.asarray(mask) > 127)
+    t = ((xx + k * yy) % P) / P * B
+    i0 = np.floor(t).astype(int) % B
+    f = t - np.floor(t)
+    rgb = prof[:, i0] * (1 - f) + prof[:, (i0 + 1) % B] * f
+    (ta, tb), (ba, bb) = s['верх'], s['низ']
+    cov = np.clip(np.minimum(yy - (ta * xx + tb), (ba * xx + bb) - yy) + 0.5, 0, 1)
+    (ax0, av0), (ax1, av1) = s['альфа']
+    al = np.clip(av0 + (av1 - av0) * (xx - ax0) / (ax1 - ax0), 0, 255)
+    frame[yy, xx, :3] = rgb.T
+    frame[yy, xx, 3] = al * cov
     img.paste(Image.fromarray(np.clip(frame + 0.5, 0, 255).astype(np.uint8), 'RGBA'), (fx, fy))
 
 
