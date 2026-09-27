@@ -980,31 +980,70 @@ def rebuild(blob, mark, tr, styles):
 CACHE_DIR = os.path.join(HERE, 'кеш', 'атласи')
 
 
+_md5s = {}                  # шлях -> ((розмір, час зміни), md5 вмісту)
+
+
+def _file_sig(p):
+    """md5 вмісту файла (пам'ятаємо, доки не змінились розмір і час): розпакування
+    оновлення з ZIP переписує час усім файлам, а вміст — той самий."""
+    import hashlib
+    try:
+        st = os.stat(p)
+    except OSError:
+        return '-'
+    stamp = (st.st_size, st.st_mtime_ns)
+    got = _md5s.get(p)
+    if got is None or got[0] != stamp:
+        with open(p, 'rb') as f:
+            got = _md5s[p] = (stamp, hashlib.md5(f.read()).hexdigest())
+    return got[1]
+
+
 def _env_sig():
-    """Усе спільне, від чого залежить малювання: код, шрифти, заготовки тла."""
+    """Усе спільне, від чого залежить малювання: код і заготовки тла (шрифти — ні:
+    вони в ключі кожного атласа, лише ті, якими він малюється)."""
     parts = []
     for d, ext in ((os.path.join(HERE, 'maryskelter'), '.py'), (os.path.join(HERE, 'neptunia'), '.py'),
-                   (FONTS, ''), (os.path.join(DIR, 'тло'), '')):
+                   (os.path.join(DIR, 'тло'), '')):
         try:
             for fn in sorted(os.listdir(d)):
                 p = os.path.join(d, fn)
                 if fn.endswith(ext) and os.path.isfile(p):
-                    st = os.stat(p)
-                    parts.append(f'{fn}:{st.st_size}:{st.st_mtime_ns}')
+                    parts.append(f'{fn}:{_file_sig(p)}')
         except OSError:
             pass
     return '|'.join(parts)
 
 
+# ключі стилю, що не впливають на малювання
+_NOT_DRAWN = ('опис', 'група', 'гра', 'мій')
+
+
+def _used_styles(mark, styles):
+    """Стилі, якими малюються кадри атласа (без опису й групи), і шрифти до них: інші
+    стилі на атлас не впливають — свій новий стиль не має перемальовувати всі атласи."""
+    used, fonts = {}, set()
+    for spec in mark['кадри'].values():
+        name = spec.get('стиль')
+        st = styles.get(name)
+        if st is None:
+            continue
+        used[name] = {k: v for k, v in st.items() if k not in _NOT_DRAWN}
+        for s in (st, spec.get('правки') or {}):
+            if s.get('шрифт'):
+                fonts.add(s['шрифт'])
+    return used, {f: _file_sig(_font_path({'шрифт': f})) for f in sorted(fonts)}
+
+
 def cached(src, blob, mark, tr, styles, fn):
     """fn(blob, mark, tr, styles) з кешем у кеш/атласи/: атлас, у якому не
-    змінилось нічого (оригінал, розмітка, переклад його написів, стилі, шрифти,
-    код), не перемальовуємо — малювання дає ті самі байти, а коштує секунди."""
+    змінилось нічого (оригінал, розмітка, переклад його написів, ужиті ним стилі
+    й шрифти, код), не перемальовуємо — малювання дає ті самі байти, а коштує секунди."""
     import hashlib, pickle
     keys = sorted({key_of(s) for s in mark['кадри'].values()})
     h = hashlib.md5(_env_sig().encode('utf-8'))
     h.update(hashlib.md5(blob).digest())
-    h.update(json.dumps([mark, {k: tr[k] for k in keys if k in tr}, styles],
+    h.update(json.dumps([mark, {k: tr[k] for k in keys if k in tr}, *_used_styles(mark, styles)],
                         sort_keys=True, ensure_ascii=False).encode('utf-8'))
     key = h.hexdigest()
     path = os.path.join(CACHE_DIR, hashlib.md5(src.encode('utf-8')).hexdigest() + '.pickle')
