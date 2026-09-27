@@ -158,7 +158,7 @@ class Editor(tk.Toplevel):
         else:
             self.marks = atl.load_marks('написи.json')
             self.atlases = Atlases(bk, app.root_dir())
-        self.styles = atl.load_json('стилі.json')
+        self.styles = atl.load_styles()
         self.rows = self._read_book()           # [{id, src, tr, where}]
         self.edits = {}                          # id -> новий переклад (ще не збережений)
         self.cur = None

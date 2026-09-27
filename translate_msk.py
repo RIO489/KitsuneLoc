@@ -728,7 +728,7 @@ def _import_atlas(a):
     todo = [s for s, m in marks.items() if any(atl.key_of(x) in tr for x in m['кадри'].values())]
     if not todo:
         return {}
-    styles = atl.load_json('стилі.json')
+    styles = atl.load_styles()
     out, n, warns = {}, 0, []
     for src, blob in _read_atlases(a, todo).items():
         new, k, w = atl.cached(src, blob, marks[src], tr, styles, atl.rebuild)

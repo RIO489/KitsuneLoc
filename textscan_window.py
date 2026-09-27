@@ -18,7 +18,7 @@ from PIL import Image, ImageTk
 import textscan
 from maryskelter import atlas as atl
 
-ZOOMS = ('50%', '100%', '200%')
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.1, 8.0, 1.25
 HANDLE = 6                      # «ручка» рамки, пікселі екрана
 PAD_AREA = 3                    # область стирання = рамка напису + запас
 PAD_FRAME = 12                  # кадр = рамка напису + місце під довший переклад
@@ -37,9 +37,9 @@ class TextScan(tk.Toplevel):
             raise RuntimeError('Пошук написів на картинках є для Mary Skelter і Neptunia.')
         self.name = textscan.MARKS[self.game]
         self.tex = textscan.Textures(self.game, bk, app.root_dir())
-        self.styles = atl.load_json('стилі.json')
+        self.styles = atl.load_styles()
         nep = self.game == 'nep'
-        self.style_names = sorted(k for k in self.styles if not k.startswith('_') and k.startswith('неп-') == nep)
+        self._style_list()
         self.found = textscan.load_found(self.game)
         self.q = queue.Queue()
         self.cur = None                 # (джерело, текстура)
@@ -101,20 +101,26 @@ class TextScan(tk.Toplevel):
         body.add(mid, weight=3)
         bar = ttk.Frame(mid)
         bar.pack(fill='x')
-        ttk.Label(bar, text='Масштаб:').pack(side='left')
-        self.zoom = tk.StringVar(value='100%')
-        z = ttk.Combobox(bar, textvariable=self.zoom, values=ZOOMS, state='readonly', width=6)
-        z.pack(side='left', padx=4)
-        z.bind('<<ComboboxSelected>>', lambda e: self._redraw(True))
-        ttk.Label(bar, text='Зелене — розмічено, жовте — знайдено. Ліва кнопка по порожньому — нова рамка, '
-                            'права — тягнути картинку, Delete / BackSpace — прибрати рамку.',
-                  style='Hint.TLabel').pack(side='left', padx=8)
+        self.z = 1.0                     # масштаб картинки на полотні
+        ttk.Button(bar, text='−', width=3, command=lambda: self._zoom_by(1 / ZOOM_STEP)).pack(side='left')
+        self.zoom_lbl = ttk.Label(bar, text='100%', width=6, anchor='center')
+        self.zoom_lbl.pack(side='left')
+        ttk.Button(bar, text='+', width=3, command=lambda: self._zoom_by(ZOOM_STEP)).pack(side='left')
+        ttk.Button(bar, text='Вмістити', command=self._fit).pack(side='left', padx=(6, 0))
+        ttk.Button(bar, text='100%', command=lambda: self._zoom_to(1.0)).pack(side='left', padx=4)
+        ttk.Label(bar, text='Ctrl + коліщатко — масштаб, права кнопка — тягнути картинку. Ліва по порожньому — '
+                            'нова рамка; Delete / BackSpace — прибрати рамку. Зелене — розмічено, жовте — знайдено.',
+                  style='Hint.TLabel', wraplength=560).pack(side='left', padx=8)
         cv = ttk.Frame(mid)
         cv.pack(fill='both', expand=True)
         self.canvas = tk.Canvas(cv, bg='#181020', highlightthickness=0, cursor='crosshair')
         xs = ttk.Scrollbar(cv, orient='horizontal', command=self.canvas.xview)
         ys = ttk.Scrollbar(cv, orient='vertical', command=self.canvas.yview)
-        self.canvas.configure(xscrollcommand=xs.set, yscrollcommand=ys.set)
+        # малюємо лише видиму частину картинки (великі текстури ×4 — сотні МБ), тож
+        # після кожного прокручування перемальовуємо видиме
+        self.canvas.configure(xscrollcommand=lambda *a: (xs.set(*a), self._view_later()),
+                              yscrollcommand=lambda *a: (ys.set(*a), self._view_later()))
+        self.canvas.bind('<Configure>', lambda e: self._view_later())
         self.canvas.grid(row=0, column=0, sticky='nsew')
         ys.grid(row=0, column=1, sticky='ns')
         xs.grid(row=1, column=0, sticky='ew')
@@ -129,6 +135,8 @@ class TextScan(tk.Toplevel):
         self.canvas.bind('<B3-Motion>', lambda e: self.canvas.scan_dragto(e.x, e.y, gain=1))
         self.canvas.bind('<ButtonRelease-3>', lambda e: self.canvas.configure(cursor='crosshair'))
         self.canvas.bind('<MouseWheel>', lambda e: self.canvas.yview_scroll(-1 if e.delta > 0 else 1, 'units'))
+        self.canvas.bind('<Control-MouseWheel>',
+                         lambda e: self._zoom_by(ZOOM_STEP if e.delta > 0 else 1 / ZOOM_STEP, e))
         self.canvas.bind('<Shift-MouseWheel>',
                          lambda e: self.canvas.xview_scroll(-1 if e.delta > 0 else 1, 'units'))
 
@@ -146,6 +154,14 @@ class TextScan(tk.Toplevel):
         cb.pack(side='left', fill='x', expand=True)
         self.b_styles = ttk.Button(srow, text='Усі стилі…', command=self._gallery)
         self.b_styles.pack(side='left', padx=(6, 0))
+        self.style_cb = cb
+        srow2 = ttk.Frame(right)
+        srow2.pack(fill='x', pady=(4, 0))
+        self.b_new_style = ttk.Button(srow2, text='Новий стиль…', command=lambda: self._edit_style(False))
+        self.b_new_style.pack(side='left')
+        self.b_edit_style = ttk.Button(srow2, text='Змінити свій стиль…', command=lambda: self._edit_style(True))
+        self.b_edit_style.pack(side='left', padx=6)
+        self.style.trace_add('write', lambda *_: self._own_state())
         ttk.Label(right, text='Тло під написом (як стерти старий):').pack(anchor='w', pady=(8, 0))
         self.mode = tk.StringVar(value='рядки')
         for m, d in MODES.items():
@@ -177,12 +193,40 @@ class TextScan(tk.Toplevel):
         self._enable(False)
 
     def _enable(self, on):
-        for b in (self.b_ok, self.b_no, self.b_styles):
+        for b in (self.b_ok, self.b_no, self.b_styles, self.b_new_style):
             b.state(['!disabled'] if on else ['disabled'])
+        self._own_state()
 
     def _gallery(self):
         if self.sel is not None:
             StyleGallery(self)
+
+    # ------------------------------------------------------------------ свої стилі
+    def _style_list(self):
+        """Стилі цієї гри: основні (у Neptunia — з префіксом «неп-») і свої, створені для неї."""
+        nep = self.game == 'nep'
+        self.style_names = sorted(
+            k for k, v in self.styles.items() if not k.startswith('_') and
+            ((v.get('гра') == self.game) if v.get('мій') else (k.startswith('неп-') == nep)))
+        if hasattr(self, 'style_cb'):
+            self.style_cb.configure(values=self.style_names)
+
+    def _own_state(self):
+        own = bool(self.styles.get(self.style.get(), {}).get('мій'))
+        if hasattr(self, 'b_edit_style'):
+            self.b_edit_style.state(['!disabled'] if own and self.sel is not None else ['disabled'])
+
+    def _edit_style(self, edit):
+        if self.sel is not None:
+            StyleEditor(self, self.style.get(), edit)
+
+    def styles_changed(self, chosen=None):
+        """Свої стилі змінились (редактор): перечитати й, якщо треба, вибрати `chosen`."""
+        self.styles = atl.load_styles()
+        self._style_list()
+        if chosen is not None:
+            self.style.set(chosen if chosen in self.style_names else '')
+        self._changed()
 
     # ------------------------------------------------------------------ список
     def _marks(self):
@@ -351,10 +395,70 @@ class TextScan(tk.Toplevel):
                       and not any(textscan.overlap(c['рамка'], d) > 0.5 for d in self.done)]
         self.sel = None
         self._select(None)
-        self._redraw(True)
+        bg = Image.new('RGBA', self.img.size, BG)
+        bg.alpha_composite(self.img)
+        self.flat = bg.convert('RGB')                 # текстура на темному тлі — для показу
+        self._fit()
 
     def _z(self):
-        return {'50%': 0.5, '100%': 1.0, '200%': 2.0}[self.zoom.get()]
+        return self.z
+
+    # ------------------------------------------------------------------ масштаб
+    def _fit(self):
+        """Уся текстура у вікні: велика — зменшити, мала — збільшити (до 400%)."""
+        if self.img is None:
+            return
+        self.update_idletasks()
+        w, h = max(50, self.canvas.winfo_width() - 4), max(50, self.canvas.winfo_height() - 4)
+        self._zoom_to(min(4.0, w / self.img.width, h / self.img.height))
+
+    def _zoom_by(self, k, e=None):
+        self._zoom_to(self.z * k, e)
+
+    def _zoom_to(self, z, e=None):
+        """Новий масштаб; точка під курсором (або центр полотна) лишається на місці."""
+        if self.img is None:
+            return
+        z = max(ZOOM_MIN, min(ZOOM_MAX, z))
+        c = self.canvas
+        ex, ey = (e.x, e.y) if e is not None else (c.winfo_width() / 2, c.winfo_height() / 2)
+        ix, iy = c.canvasx(ex) / self.z, c.canvasy(ey) / self.z
+        self.z = z
+        W, H = self.img.width * z, self.img.height * z
+        c.configure(scrollregion=(0, 0, W, H))
+        c.xview_moveto(max(0.0, (ix * z - ex) / W))
+        c.yview_moveto(max(0.0, (iy * z - ey) / H))
+        self.zoom_lbl.configure(text=f'{round(z * 100)}%')
+        self._redraw(True)
+
+    def _view_later(self):
+        if getattr(self, '_view_job', None) is None:
+            self._view_job = self.after_idle(self._view)
+
+    def _view(self):
+        """Намалювати видиму частину текстури в поточному масштабі."""
+        self._view_job = None
+        if self.img is None or not hasattr(self, 'flat'):
+            return
+        c, z = self.canvas, self.z
+        vx0, vy0 = c.canvasx(0), c.canvasy(0)
+        vx1, vy1 = vx0 + c.winfo_width(), vy0 + c.winfo_height()
+        ix0, iy0 = max(0, int(vx0 / z)), max(0, int(vy0 / z))
+        ix1 = min(self.img.width, int(vx1 / z) + 2)
+        iy1 = min(self.img.height, int(vy1 / z) + 2)
+        if ix1 <= ix0 or iy1 <= iy0:
+            return
+        key = (ix0, iy0, ix1, iy1, z)
+        if key == getattr(self, '_view_key', None):
+            return
+        self._view_key = key
+        part = self.flat.crop((ix0, iy0, ix1, iy1))
+        size = (max(1, round((ix1 - ix0) * z)), max(1, round((iy1 - iy0) * z)))
+        part = part.resize(size, Image.NEAREST if z >= 1 else Image.BOX)
+        self.photo = ImageTk.PhotoImage(part)
+        c.delete('img')
+        c.create_image(ix0 * z, iy0 * z, image=self.photo, anchor='nw', tags='img')
+        c.tag_lower('img')
 
     def _redraw(self, image=False):
         if self.img is None:
@@ -362,16 +466,8 @@ class TextScan(tk.Toplevel):
         z = self._z()
         c = self.canvas
         if image:
-            bg = Image.new('RGBA', self.img.size, BG)
-            bg.alpha_composite(self.img)
-            im = bg.convert('RGB')
-            if z != 1.0:
-                im = im.resize((max(1, int(im.width * z)), max(1, int(im.height * z))),
-                               Image.LANCZOS if z < 1 else Image.NEAREST)
-            self.photo = ImageTk.PhotoImage(im)
-            c.delete('all')
-            c.create_image(0, 0, image=self.photo, anchor='nw', tags='img')
-            c.configure(scrollregion=(0, 0, im.width, im.height))
+            self._view_key = None
+            self._view()
         c.delete('box')
         for b in self.done:
             c.create_rectangle(*[v * z for v in b], outline='#3ddc84', width=2, tags='box')
@@ -691,7 +787,9 @@ class StyleGallery(tk.Toplevel):
             card = tk.Frame(self.inner, bg='#221b2b', highlightthickness=2, highlightbackground='#221b2b',
                             padx=6, pady=4)
             card.grid(row=k // self.COLS, column=k % self.COLS, sticky='nw', padx=4, pady=4)
-            lab = tk.Label(card, text=name, bg='#221b2b', fg='#eeeeee', anchor='w', font=('Segoe UI', 9))
+            mine = self.styles.get(name, {}).get('мій')
+            lab = tk.Label(card, text=name + ('  ★ мій' if mine else ''), bg='#221b2b',
+                           fg='#ffd970' if mine else '#eeeeee', anchor='w', font=('Segoe UI', 9))
             lab.pack(anchor='w')
             pic = tk.Label(card, text='…', bg='#181020', fg='#999999', bd=0)
             pic.pack(anchor='w')
@@ -705,6 +803,7 @@ class StyleGallery(tk.Toplevel):
         bot.pack(fill='x')
         ttk.Button(bot, text='Закрити', command=self._close).pack(side='right')
         ttk.Button(bot, text='Взяти вибраний', style='Accent.TButton', command=self._take).pack(side='right', padx=8)
+        ttk.Button(bot, text='Новий стиль на основі вибраного…', command=self._new).pack(side='left')
         self.protocol('WM_DELETE_WINDOW', self._close)
         self._select(self.sel)
         threading.Thread(target=self._work, daemon=True).start()
@@ -761,6 +860,313 @@ class StyleGallery(tk.Toplevel):
             self.scan.style.set(self.names[self.sel])
         self._close()
 
+    def _new(self):
+        base = self.names[self.sel]
+        self._close()
+        StyleEditor(self.scan, base, False)
+
     def _close(self):
         self.alive = False
+        self.destroy()
+
+
+class StyleEditor(tk.Toplevel):
+    """Свій стиль перекладача: за основу — вибраний стиль, змінюються шрифт, товщина,
+    колір (чи градієнт), обведення, тінь, нахил, поворот, розрядка й квадратність; решта
+    ключів основи (сяйво, друге обведення, розтяг…) переходить як є. Прев'ю — на вибраному
+    місці картинки. Зберігається в атлас/стилі.мої.json (atl.save_user_style)."""
+
+    SAMPLE = 'Приклад Їжак'
+
+    def __init__(self, scan, base, edit):
+        super().__init__(scan)
+        import copy
+        from maryskelter import fontlib
+        self.scan, self.edit, self.base = scan, edit, base
+        self.st = copy.deepcopy(scan.styles.get(base, {}))
+        self.st.pop('мій', None)
+        self.fonts = fontlib.font_files()
+        self.font_dir = {fn: d for d, fn in self.fonts}
+        self.q = queue.Queue()
+        self.gen, self.pending, self.photos = 0, None, []
+        self.title(('Змінити свій стиль «%s»' if edit else 'Новий стиль на основі «%s»') % base)
+        self.geometry('900x720')
+        self._build()
+        self._changed(0)
+        self.after(60, self._poll)
+
+    # ------------------------------------------------------------------ вигляд
+    def _build(self):
+        st = self.st
+        f = ttk.Frame(self, padding=10)
+        f.pack(side='left', fill='y')
+        r = 0
+
+        def row(label, widget):
+            nonlocal r
+            ttk.Label(f, text=label).grid(row=r, column=0, sticky='w', pady=3)
+            widget.grid(row=r, column=1, sticky='w', pady=3)
+            r += 1
+
+        self.name = tk.StringVar(value=self.base if self.edit else '')
+        e = ttk.Entry(f, textvariable=self.name, width=30)
+        if self.edit:
+            e.state(['disabled'])
+        row('Назва:', e)
+        # опис основи для нового стилю не годиться («Назва району на карті…» — вже не про нього)
+        self.desc = tk.StringVar(value=st.get('опис', '') if self.edit else '')
+        if not self.edit:
+            self.st.pop('опис', None)
+        row('Опис:', ttk.Entry(f, textvariable=self.desc, width=30))
+
+        self.font = tk.StringVar(value=st.get('шрифт', ''))
+        cb = ttk.Combobox(f, textvariable=self.font, values=[fn for _d, fn in self.fonts],
+                          state='readonly', width=34)
+        cb.bind('<<ComboboxSelected>>', lambda e: self._font_changed())
+        row('Шрифт:', cb)
+        var = st.get('варіація')
+        self.weight = tk.DoubleVar(value=var.get('wght', 700) if isinstance(var, dict) else 700)
+        self.weight_touched = False
+        self.w_scale = ttk.Scale(f, from_=100, to=900, variable=self.weight, length=200,
+                                 command=lambda _v: self._touch_weight())
+        row('Товщина:', self.w_scale)
+
+        fill = st.get('заливка', '#ffffff')
+        self.fill1 = tk.StringVar(value=fill[0] if isinstance(fill, list) else fill)
+        self.fill2 = tk.StringVar(value=fill[-1] if isinstance(fill, list) else fill)
+        self.grad = tk.BooleanVar(value=isinstance(fill, list))
+        fr = ttk.Frame(f)
+        self._color_btn(fr, self.fill1).pack(side='left')
+        ttk.Checkbutton(fr, text='градієнт до', variable=self.grad,
+                        command=self._changed).pack(side='left', padx=6)
+        self._color_btn(fr, self.fill2).pack(side='left')
+        row('Колір літер:', fr)
+
+        ob = st.get('обведення') or {}
+        self.ob_on = tk.BooleanVar(value=bool(ob))
+        self.ob_col = tk.StringVar(value=ob.get('колір', '#2e0010'))
+        self.ob_w = tk.DoubleVar(value=ob.get('товщина', 2))
+        fr = ttk.Frame(f)
+        ttk.Checkbutton(fr, variable=self.ob_on, command=self._changed).pack(side='left')
+        self._color_btn(fr, self.ob_col).pack(side='left')
+        ttk.Label(fr, text=' товщина').pack(side='left')
+        ttk.Spinbox(fr, from_=0.5, to=10, increment=0.5, textvariable=self.ob_w, width=5,
+                    command=self._changed).pack(side='left', padx=4)
+        row('Обведення:', fr)
+
+        sh = st.get('тінь') or {}
+        self.sh_on = tk.BooleanVar(value=bool(sh))
+        self.sh_col = tk.StringVar(value=(sh.get('колір') or '#000000c0'))
+        dx, dy = (sh.get('зсув') or [2, 3])[:2]
+        self.sh_dx, self.sh_dy = tk.DoubleVar(value=dx), tk.DoubleVar(value=dy)
+        self.sh_blur = tk.DoubleVar(value=sh.get('розмиття', 0.5))
+        fr = ttk.Frame(f)
+        ttk.Checkbutton(fr, variable=self.sh_on, command=self._changed).pack(side='left')
+        self._color_btn(fr, self.sh_col).pack(side='left')
+        for lab, v, lo, hi in ((' зсув x', self.sh_dx, -10, 10), (' y', self.sh_dy, -10, 10),
+                               (' розмиття', self.sh_blur, 0, 6)):
+            ttk.Label(fr, text=lab).pack(side='left')
+            ttk.Spinbox(fr, from_=lo, to=hi, increment=0.5, textvariable=v, width=4,
+                        command=self._changed).pack(side='left')
+        row('Тінь:', fr)
+
+        self.sliders = {}
+        for key, label, lo, hi, dflt in (('нахил', 'Нахил:', -0.2, 0.5, 0), ('поворот', 'Поворот:', -30, 30, 0),
+                                         ('розрядка', 'Розрядка:', -0.1, 0.4, 0),
+                                         ('квадратність', 'Квадратність:', 0, 1, 0)):
+            v = tk.DoubleVar(value=st.get(key, dflt))
+            fr = ttk.Frame(f)
+            lab = ttk.Label(fr, width=6)
+            ttk.Scale(fr, from_=lo, to=hi, variable=v, length=180,
+                      command=lambda _v, v=v, lab=lab: (lab.configure(text=f'{v.get():.2f}'),
+                                                         self._changed())).pack(side='left')
+            lab.configure(text=f'{v.get():.2f}')
+            lab.pack(side='left', padx=4)
+            row(label, fr)
+            self.sliders[key] = v
+        for v in (self.ob_w, self.sh_dx, self.sh_dy, self.sh_blur, self.fill1, self.fill2,
+                  self.ob_col, self.sh_col):
+            v.trace_add('write', lambda *_: self._changed())
+
+        bt = ttk.Frame(f)
+        bt.grid(row=r, column=0, columnspan=2, sticky='w', pady=(14, 0))
+        ttk.Button(bt, text='Зберегти стиль', style='Accent.TButton', command=self._save).pack(side='left')
+        if self.edit:
+            ttk.Button(bt, text='Видалити стиль', command=self._delete).pack(side='left', padx=6)
+        ttk.Button(bt, text='Скасувати', command=self.destroy).pack(side='left', padx=6)
+        self.msg = tk.StringVar()
+        ttk.Label(f, textvariable=self.msg, wraplength=380, foreground='#b36b00').grid(
+            row=r + 1, column=0, columnspan=2, sticky='w', pady=(8, 0))
+        self._font_changed(init=True)
+
+        pv = ttk.Frame(self, padding=10)
+        pv.pack(side='left', fill='both', expand=True)
+        self.prev = []
+        for title in ('Оригінал', 'Цим стилем — англійською', 'Цим стилем — українською'):
+            ttk.Label(pv, text=title, style='Hint.TLabel').pack(anchor='w')
+            lab = tk.Label(pv, bg='#181020', bd=0)
+            lab.pack(anchor='w', pady=(0, 10))
+            self.prev.append(lab)
+
+    def _color_btn(self, parent, var):
+        from tkinter import colorchooser
+        b = tk.Label(parent, width=3, relief='solid', bd=1, cursor='hand2')
+
+        def paint(*_):
+            try:
+                b.configure(bg=var.get()[:7])
+            except tk.TclError:
+                pass
+
+        def pick(_e):
+            res = colorchooser.askcolor(color=var.get()[:7], parent=self)
+            if res and res[1]:
+                var.set(res[1] + var.get()[7:9])            # прозорість (#rrggbbaa) — як була
+        b.bind('<Button-1>', pick)
+        var.trace_add('write', paint)
+        paint()
+        return b
+
+    def _font_changed(self, init=False):
+        from maryskelter import fontlib
+        fn = self.font.get()
+        d = self.font_dir.get(fn)
+        has_w = bool(d and 'Weight' in fontlib.axes(os.path.join(d, fn)))
+        self.w_scale.state(['!disabled'] if has_w else ['disabled'])
+        if not init:
+            self.weight_touched = True
+            self._changed()
+
+    def _touch_weight(self):
+        self.weight_touched = True
+        self._changed()
+
+    # ------------------------------------------------------------------ стиль
+    def style(self):
+        from maryskelter import fontlib
+        st = dict(self.st)
+        fn = self.font.get()
+        d = self.font_dir.get(fn)
+        if d:
+            fontlib.register(d, fn)
+        st['шрифт'] = fn
+        if self.weight_touched:
+            var = fontlib.variation(os.path.join(d, fn), self.weight.get()) if d else None
+            if var:
+                st['варіація'] = var
+            else:
+                st.pop('варіація', None)
+        st['заливка'] = [self.fill1.get(), self.fill2.get()] if self.grad.get() else self.fill1.get()
+        try:
+            if self.ob_on.get():
+                st['обведення'] = {'колір': self.ob_col.get(), 'товщина': float(self.ob_w.get())}
+            else:
+                st.pop('обведення', None)
+            if self.sh_on.get():
+                st['тінь'] = {'колір': self.sh_col.get(),
+                              'зсув': [float(self.sh_dx.get()), float(self.sh_dy.get())],
+                              'розмиття': float(self.sh_blur.get())}
+            else:
+                st.pop('тінь', None)
+        except (tk.TclError, ValueError):
+            pass
+        for key, v in self.sliders.items():
+            val = round(v.get(), 3)
+            if abs(val) < 1e-3 and key not in self.st:
+                st.pop(key, None)
+            else:
+                st[key] = val
+        if self.desc.get().strip():
+            st['опис'] = self.desc.get().strip()
+        st['гра'] = self.scan.game
+        return st
+
+    def _changed(self, delay=250):
+        if self.pending:
+            self.after_cancel(self.pending)
+        self.pending = self.after(delay, self._render)
+
+    def _render(self):
+        self.pending = None
+        scan = self.scan
+        if scan.sel is None or scan.img is None:
+            return
+        self.gen += 1
+        gen, st, (_k, spec), img = self.gen, self.style(), scan._spec(), scan.img
+        styles = dict(scan.styles, __пробний=st)
+        spec = dict(spec, стиль='__пробний')
+
+        def work():
+            box = tuple(spec['рамка'])
+            out = [img.crop(box)]
+            warn = []
+            for text in (spec['текст'], self.SAMPLE):
+                try:
+                    im = img.copy()
+                    warn += atl.draw(im, box, spec, styles, text)
+                    out.append(im.crop(box))
+                except Exception as ex:                               # noqa: BLE001
+                    out.append(None)
+                    warn.append(f'не вдалося: {ex}')
+            self.q.put((gen, out, warn))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _poll(self):
+        if not self.winfo_exists():
+            return
+        try:
+            while True:
+                gen, ims, warn = self.q.get_nowait()
+                if gen != self.gen:
+                    continue
+                self.photos = []
+                for lab, im in zip(self.prev, ims):
+                    if im is None:
+                        lab.configure(image='')
+                        continue
+                    bg = Image.new('RGBA', im.size, BG)
+                    bg.alpha_composite(im)
+                    s = min(3.0, 460 / max(1, bg.width))
+                    bg = bg.resize((max(1, int(bg.width * s)), max(1, int(bg.height * s))), Image.LANCZOS)
+                    ph = ImageTk.PhotoImage(bg.convert('RGB'))
+                    self.photos.append(ph)
+                    lab.configure(image=ph)
+                self.msg.set('\n'.join(dict.fromkeys(w for w in warn if 'не вдалося' in w)))
+        except queue.Empty:
+            pass
+        self.after(60, self._poll)
+
+    # ------------------------------------------------------------------ збереження
+    def _save(self):
+        name = self.name.get().strip()
+        if not name:
+            self.msg.set('Дай стилю назву.')
+            return
+        if not self.edit and name in self.scan.styles:
+            self.msg.set('Стиль з такою назвою вже є — вибери іншу назву.')
+            return
+        if name.startswith('_'):
+            self.msg.set('Назва не може починатися з «_».')
+            return
+        from maryskelter import fontlib
+        st = self.style()
+        fontlib.adopt(st['шрифт'])                   # шрифт з бібліотеки — у атлас/шрифти/
+        atl.save_user_style(name, st)
+        self.scan.styles_changed(chosen=name)
+        self.destroy()
+
+    def _users(self, name):
+        return sum(1 for m in atl.load_marks(self.scan.name).values()
+                   for s in m.get('кадри', {}).values() if s.get('стиль') == name)
+
+    def _delete(self):
+        name = self.base
+        n = self._users(name)
+        if n:
+            self.msg.set(f'Стиль ужито в написах: {n}. Спершу вибери для них інший стиль.')
+            return
+        if not messagebox.askyesno('Видалити стиль', f'Видалити свій стиль «{name}»?', parent=self):
+            return
+        atl.save_user_style(name, None)
+        self.scan.styles_changed(chosen='')
         self.destroy()

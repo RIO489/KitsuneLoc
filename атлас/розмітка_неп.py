@@ -170,7 +170,7 @@ def cmd_add(src, style, bg, pairs, title=None, align='ліво'):
 
 def cmd_check(srcs):
     m = load_marks()
-    styles = atl.load_json('стилі.json')
+    styles = atl.load_styles()
     srcs = srcs or [k for k in m if not k.startswith('_')]
     rows = []
     for src in srcs:
@@ -254,6 +254,12 @@ def main():
         atl.save_user(natl.MARKS, {k: v for k, v in atl.load_user(natl.MARKS).items()
                                    if k.startswith('_')})
         print(f'забрано в основну розмітку кадрів: {n}')
+        # свої стилі (спільні для обох ігор) — тим самим кодом, що й розмітка.py
+        import importlib.util
+        sp = importlib.util.spec_from_file_location('_msk_tool', os.path.join(HERE, 'розмітка.py'))
+        tool = importlib.util.module_from_spec(sp)
+        sp.loader.exec_module(tool)
+        tool.fold_styles()
     else:
         print(__doc__)
 

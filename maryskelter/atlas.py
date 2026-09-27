@@ -135,6 +135,31 @@ def save_user(name, data):
     os.replace(p + '.tmp', p)
 
 
+STYLES = 'стилі.json'
+
+
+def load_styles(user=True):
+    """Стилі: основні (стилі.json, у git) + свої стилі перекладача (стилі.мої.json).
+    Свій стиль має позначку "мій": true; з тією самою назвою, що й основний, не буває
+    (вікно не дає), але якщо трапиться — основний не перекривається."""
+    st = {k: v for k, v in _read(STYLES).items()}
+    if user:
+        for k, v in _read(user_file(STYLES)).items():
+            if not k.startswith('_') and k not in st:
+                st[k] = dict(v, мій=True)
+    return st
+
+
+def save_user_style(name, style):
+    """Записати (style=None — прибрати) свій стиль перекладача."""
+    user = _read(user_file(STYLES))
+    if style is None:
+        user.pop(name, None)
+    else:
+        user[name] = {k: v for k, v in style.items() if k != 'мій'}
+    save_user(STYLES, user)
+
+
 def fold_user_marks(name):
     """Для власника: розмітку перекладача — в основну; повертає, скільки кадрів забрано.
     Службові ключі ("_відхилено") лишаються у «мої»."""

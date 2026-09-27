@@ -321,7 +321,7 @@ def cmd_bg(src, i, name):
 
 def cmd_check(srcs):
     m = load_marks()
-    styles = atl.load_json('стилі.json')
+    styles = atl.load_styles()
     os.makedirs(OUT, exist_ok=True)
     for src in srcs or list(m):
         mk = m[src]
@@ -394,6 +394,20 @@ def cmd_fold():
     atl.save_user('написи.json', {k: v for k, v in atl.load_user('написи.json').items()
                                   if k.startswith('_')})
     print(f'забрано в основну розмітку кадрів: {n}')
+    fold_styles()
+
+
+def fold_styles():
+    """Свої стилі перекладача (стилі.мої.json) — в основні."""
+    mine = {k: v for k, v in atl.load_user(atl.STYLES).items() if not k.startswith('_')}
+    if not mine:
+        return
+    st = load_styles()
+    for k, v in mine.items():
+        st[k] = {a: b for a, b in v.items() if a != 'мій'}
+    save_styles(st)
+    atl.save_user(atl.STYLES, {})
+    print(f'забрано в основні стилі: {", ".join(mine)}')
 
 
 if __name__ == '__main__':
