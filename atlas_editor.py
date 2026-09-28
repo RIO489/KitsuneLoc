@@ -408,6 +408,24 @@ class Editor(tk.Toplevel):
         ttk.Label(bot, textvariable=self.saved, style='Hint.TLabel').pack(side='left')
         ttk.Button(bot, text='Закрити', command=self._close).pack(side='right')
         ttk.Button(bot, text='Зберегти в книгу', command=self._save).pack(side='right', padx=8)
+        ttk.Button(bot, text='Повідомити про цей напис…', command=self._report).pack(side='right')
+
+    def _report(self):
+        """Звернення до власника про напис: текст + прев'ю «оригінал | переклад»."""
+        if not self.cur:
+            self.app.open_feedback({'game': self.game, 'kind': 'вигляд'})
+            return
+        r = next(x for x in self.rows if x['id'] == self.cur)
+        img = None
+        res = getattr(self, 'last_res', None)
+        if res:
+            a, b = res[0][0], res[0][1]
+            img = Image.new('RGBA', (a.width + b.width + 8, max(a.height, b.height)), BG)
+            img.alpha_composite(a, (0, 0))
+            img.alpha_composite(b, (a.width + 8, 0))
+        self.app.open_feedback({'game': self.game, 'kind': 'вигляд', 'image': img, 'row': {
+            'source': r.get('source', '@атлас'), 'id': r['id'], 'src': r['src'],
+            'tr': self._value(r), 'where': r.get('where', '')}})
 
     # ---------------------------------------------------------------- список
     def _value(self, r):
@@ -503,6 +521,7 @@ class Editor(tk.Toplevel):
     def _show(self, gen, text, res, err):
         if gen != self.gen or not self.winfo_exists():
             return
+        self.last_res = res
         self.photos = []
         for k, (a, b) in enumerate(self.cells):
             if k < len(res):

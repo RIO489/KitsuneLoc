@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '1.10'
+VERSION = '1.11'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -197,6 +197,10 @@ def human(n):
 
 
 class App(tk.Tk):
+    # для вікон в окремих модулях (feedback_window): цей файл не імпортується
+    GAMES, VERSION = GAMES, VERSION
+    steam_libraries = staticmethod(steam_libraries)
+
     def __init__(self):
         super().__init__()
         try:
@@ -227,6 +231,7 @@ class App(tk.Tk):
         self.say(f'KitsuneLoc, версія {VERSION}.', 'dim')
         self.after(80, self._poll)
         self.after(200, self._check_deps)
+        self.after(3000, self._feedback_flush)
 
     # ------------------------------------------------------------------ вигляд
     def _build(self):
@@ -310,6 +315,9 @@ class App(tk.Tk):
         self.b_rest = ttk.Button(row, text='Повернути оригінали гри',
                                  command=lambda: self._run(self.do_restore))
         self.b_rest.pack(side='left')
+        self.b_report = ttk.Button(row, text='Повідомити про проблему…',
+                                   command=lambda: self.open_feedback())
+        self.b_report.pack(side='left', padx=8)
         self.b_copy = ttk.Button(row, text='Скопіювати лог', command=self.copy_log)
         self.b_copy.pack(side='right')
         self.b_theme = ttk.Button(row, text='Темна тема', command=self._toggle_theme)
@@ -1216,6 +1224,10 @@ class App(tk.Tk):
         else:
             m.add_command(label='Затвердити: це не помилка',
                           command=lambda: self._approve(name, True))
+        m.add_separator()
+        m.add_command(label='Повідомити про це попередження…', command=lambda: self.open_feedback({
+            'game': game, 'kind': 'вигляд',
+            'row': {'source': s, 'id': i, 'src': src or '', 'tr': tr or '', 'warn': msg}}))
         try:
             m.tk_popup(event.x_root, event.y_root)
         finally:
@@ -1364,6 +1376,54 @@ class App(tk.Tk):
             terms_window.TermsWindow(self)
         except Exception as e:
             messagebox.showerror('Терміни', str(e))
+
+    # ------------------------------------------------------ звернення (feedback.py)
+    def colors(self):
+        return THEMES[self.theme]
+
+    def dark_titlebar(self, win):
+        dark_titlebar(win, self.theme == 'dark')
+
+    def open_feedback(self, ctx=None):
+        """Вікно «Повідомити про проблему» (feedback_window.py); ctx — рядок, звідки відкрито."""
+        try:
+            import importlib, feedback, feedback_window
+            importlib.reload(feedback)
+            importlib.reload(feedback_window)
+            feedback_window.FeedbackWindow(self, ctx)
+        except Exception as e:
+            messagebox.showerror('Звернення', f'{e}\n\n{traceback.format_exc()}')
+
+    def say_sent(self, link):
+        if link:
+            import webbrowser
+            self.q.put(('act', ('Звернення надіслано ✓ — відкрити тему в Telegram', 'ok',
+                                lambda: webbrowser.open(link))))
+        else:
+            self.say('Звернення надіслано ✓', 'ok')
+
+    def _feedback_flush(self):
+        """Надіслати звернення, що чекають у черзі (без інтернету чи до підключення);
+        при старті й далі раз на 5 хвилин, поки черга не порожня."""
+        import feedback
+        if not feedback.pending():
+            return
+        if not feedback.load_key():
+            self.say(f'Звернень чекає відправки: {len(feedback.pending())} — підключи відправку '
+                     '(«Повідомити про проблему…» → «Підключити…»).', 'warn')
+            return
+
+        def job():
+            try:
+                sent, left, links = feedback.flush(self.say)
+            except Exception as ex:                          # noqa: BLE001
+                sent, left, links = 0, 1, []
+                self.say(f'Звернення не надіслано: {ex}', 'err')
+            for link in links:
+                self.q.put(('call', lambda l=link: self.say_sent(l)))
+            if left:
+                self.q.put(('call', lambda: self.after(5 * 60 * 1000, self._feedback_flush)))
+        threading.Thread(target=job, daemon=True).start()
 
     # ------------------------------------------------------ редактор перекладу
     def get_project(self):

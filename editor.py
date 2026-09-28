@@ -859,10 +859,22 @@ class Editor(tk.Toplevel):
         m.add_command(label='Вставити з буфера в переклад', command=lambda: self._paste(keys))
         m.add_command(label='Скопіювати оригінал у переклад', command=lambda: self._copy_src(keys))
         m.add_command(label='Очистити переклад', command=lambda: self._clear(keys))
+        m.add_separator()
+        m.add_command(label='Повідомити про цей рядок…', command=lambda: self._report(keys[0]))
         try:
             m.tk_popup(ev.x_root, ev.y_root)
         finally:
             m.grab_release()
+
+    def _report(self, k):
+        """Звернення до власника про рядок (feedback_window) — з оригіналом і перекладом."""
+        self._commit()
+        r = self.pr.by_key[k]
+        e = r['e']
+        self.app.open_feedback({'game': self.pr.game, 'row': {
+            'source': r['source'], 'id': e['id'], 'src': e.get('src', ''), 'tr': self.pr.tr(k),
+            'warn': self.warn.get() if k == self.cur else '',
+            'where': f'{r["book"]} · {r["scene"]}'}})
 
     def _to_group(self, name):
         self._commit()
