@@ -20,7 +20,7 @@ import glossary, project, sheets
 SAVE_DELAY = 1500           # мс після останньої правки — запис на диск
 COMMIT_DELAY = 250          # мс після набору — переклад іде в рядок (і в однакові)
 PREVIEW_W = 560             # ширина прев'ю в панелі, px
-FILTERS = ('Усі', 'Неперекладені', 'Перекладені', 'Відв\'язані', 'З приміткою')
+FILTERS = ('Усі', 'Неперекладені', 'Перекладені', 'Відв\'язані', 'З приміткою', 'Не перекладати')
 
 
 def colors(app):
@@ -218,6 +218,7 @@ class Editor(tk.Toplevel):
         self.list.pack(side='left', fill='both', expand=True)
         self.list.tag_configure('todo', foreground=c['dim'])
         self.list.tag_configure('solo', foreground=c.get('warn', '#8a6100'))
+        self.list.tag_configure('keep', foreground=c['dim'], font=('Segoe UI', 9, 'italic'))
         self.list.bind('<<TreeviewSelect>>', lambda e: self._row_selected())
         self.list.bind('<Button-3>', self._list_menu)
         self.list.bind('<Return>', lambda e: (self.tr_text.focus_set(), 'break')[1])
@@ -295,6 +296,13 @@ class Editor(tk.Toplevel):
         ttk.Label(bot, textvariable=self.status, style='Hint.TLabel').pack(side='left')
         self.count = tk.StringVar()
         ttk.Label(bot, textvariable=self.count).pack(side='right')
+        # як у «Гра на екрані»: редактор над грою (перекладач грає й одразу править)
+        settings = getattr(self.app, 'settings', {})
+        self.ontop = tk.BooleanVar(value=bool(settings.get('editor_ontop', False)))
+        ttk.Checkbutton(bot, text='Поверх усіх вікон', variable=self.ontop,
+                        command=self._set_ontop).pack(side='right', padx=(0, 16))
+        if self.ontop.get():
+            self.attributes('-topmost', True)
 
     def _initial_panes(self):
         """Початкові ширини: дерево ~280 px, панель рядка ~620 px, решта — список."""
@@ -340,6 +348,7 @@ class Editor(tk.Toplevel):
         self.warn_lbl.configure(wraplength=wrap)
         self.where_lbl.configure(wraplength=wrap)
         self._later('preview', 200, self._preview)
+        self._later('fit_text', 150, self._fit_all)      # інша ширина — інші переноси
 
     def _text(self, parent, h, readonly=False, pack=True):
         c = self.c
@@ -352,6 +361,30 @@ class Editor(tk.Toplevel):
         if pack:
             t.pack(fill='x')
         return t
+
+    # висота полів під текст (рядків на екрані, з переносами за шириною панелі):
+    # (найменше, найбільше) — довше прокручується, щоб не витіснити решту панелі
+    FIT = {'src': (2, 12), 'ja': (1, 14), 'tr': (3, 12)}
+
+    def _fit_text(self, t, lo, hi):
+        try:
+            n = t.count('1.0', 'end', 'displaylines')
+        except tk.TclError:
+            return
+        n = (n[0] if isinstance(n, tuple) else n) or 1
+        h = max(lo, min(hi, n))
+        if int(t.cget('height')) != h:
+            t.configure(height=h)
+
+    def _fit_all(self):
+        """Японський (і будь-який довгий) текст більше не ховається за полем перекладу:
+        висота кожного поля — за його текстом."""
+        if not self.winfo_exists():
+            return
+        self._fit_text(self.src_text, *self.FIT['src'])
+        if getattr(self, '_ja_shown', False):
+            self._fit_text(self.ja_text, *self.FIT['ja'])
+        self._fit_text(self.tr_text, *self.FIT['tr'])
 
     @staticmethod
     def _set_text(t, s):
@@ -408,7 +441,8 @@ class Editor(tk.Toplevel):
 
     # ============================================================ дерево
     def _pc(self, rows):
-        rows = [r for r in rows if r['kind'] != 'key']
+        # «не перекладати», службові й порожні оригінали — не рахуються (project.counted)
+        rows = [r for r in rows if self.pr.counted(r)]
         if not rows:
             return ''
         d = sum(1 for r in rows if r['e'].get('tr'))
@@ -500,21 +534,23 @@ class Editor(tk.Toplevel):
         f = self.flt.get()
         if f == 'Неперекладені':
             # порожній оригінал (коротка назва навички) — необов'язковий, тут не заважає
-            rows = [r for r in rows if not r['e'].get('tr') and r['e']['src']]
+            # «не перекладати» — теж: перекладач сам вирішив лишити оригінал
+            rows = [r for r in rows if not r['e'].get('tr') and r['e']['src'] and not r.get('лишити')]
         elif f == 'Перекладені':
             rows = [r for r in rows if r['e'].get('tr')]
         elif f == 'Відв\'язані':
             rows = [r for r in rows if r.get('окремо')]
         elif f == 'З приміткою':
             rows = [r for r in rows if r['e'].get('note')]
+        elif f == 'Не перекладати':
+            rows = [r for r in rows if r.get('лишити')]
         q = self.q_var.get().strip().lower()
         if q:
             rows = [r for r in rows if q in r['e']['src'].lower()
                     or q in r['e'].get('tr', '').lower() or q in (r['who'] or '').lower()]
         self.view = rows
         self.list.delete(*self.list.get_children())
-        done = sum(1 for r in rows if r['e'].get('tr'))
-        self.count.set(f'рядків: {len(rows)} · перекладено: {done}')
+        self._count(rows)
         if not rows:
             self.cur = None
             self._show_row()
@@ -526,6 +562,15 @@ class Editor(tk.Toplevel):
         # готове одразу, решта списку доповнюється за частки секунди
         self._fill_gen = getattr(self, '_fill_gen', 0) + 1
         self._fill_chunk(self._fill_gen, rows, 0, target or str(rows[0]['n']))
+
+    def _count(self, rows):
+        """Нижній рядок: рядки й слова (в оригіналі) того, що показано; «не перекладати»,
+        службові й порожні — не рахуються."""
+        done = sum(1 for r in rows if r['e'].get('tr'))
+        st = self.pr.stats(rows)
+        w = f'{st["words_done"]:,} з {st["words"]:,}'.replace(',', ' ')
+        pc = f' ({100 * st["words_done"] // st["words"]}%)' if st['words'] else ''
+        self.count.set(f'рядків: {len(rows)} · перекладено: {done} · слів перекладено: {w}{pc}')
 
     FIRST_CHUNK, CHUNK = 400, 2500
 
@@ -545,11 +590,13 @@ class Editor(tk.Toplevel):
 
     def _values(self, r, i):
         twins = len(self.pr.twins(r['k']))
-        st = '✂' if r.get('окремо') else (f'×{twins}' if twins > 1 else '')
+        st = '⊘' if r.get('лишити') else '✂' if r.get('окремо') else (f'×{twins}' if twins > 1 else '')
         who = 'ім\'я' if r['kind'] == 'name' else ('ключ' if r['kind'] == 'key' else self.pr.speaker(r))
         return (i, st, who, one_line(r['e']['src']), one_line(r['e'].get('tr', '')))
 
     def _tags(self, r):
+        if r.get('лишити'):
+            return ('keep',)
         if r.get('окремо'):
             return ('solo',)
         return () if r['e'].get('tr') else ('todo',)
@@ -654,11 +701,13 @@ class Editor(tk.Toplevel):
                 self._text_for = k          # для якого рядка зараз текст у полі (див. _commit)
             self.note.set(e.get('note', ''))
             self._link_state()
+            self._keep_note()
             self._checks()
             self._fill_terms()
         finally:
             self._loading = False
         self._later('preview', 80, self._preview)
+        self.after_idle(self._fit_all)                   # після розкладки: переноси вже відомі
 
     def _link_state(self):
         k = self.cur
@@ -678,6 +727,12 @@ class Editor(tk.Toplevel):
             self.link_info.set(f'Такий самий оригінал ще в {twins - 1} місцях — переклад спільний '
                                f'({n} пов\'язаних).')
             self.b_link.configure(text='Відв\'язати тут')
+
+    def _keep_note(self):
+        """Підказка під полем: рядок позначено «не перекладати»."""
+        if self.cur and self.pr.by_key[self.cur].get('лишити'):
+            self.link_info.set('⊘ Не перекладати — у грі лишається оригінал '
+                               '(права кнопка по рядку → «Повернути до перекладу»). ' + self.link_info.get())
 
     def _toggle_link(self):
         k = self.cur
@@ -738,6 +793,7 @@ class Editor(tk.Toplevel):
             return
         self._later('commit', COMMIT_DELAY, self._commit)
         self._later('preview', 300, self._preview)
+        self._fit_text(self.tr_text, *self.FIT['tr'])     # поле росте разом із перекладом
 
     def _enter(self, _e):
         return self._step(1)
@@ -877,6 +933,11 @@ class Editor(tk.Toplevel):
             m.add_command(label=f'Прибрати з групи «{val}»',
                           command=lambda: self._from_group(val, keys))
         m.add_separator()
+        if all(self.pr.by_key[k].get('лишити') for k in keys):
+            m.add_command(label='Повернути до перекладу', command=lambda: self._keep(keys, False))
+        else:
+            m.add_command(label='Не перекладати (лишити оригінал)', command=lambda: self._keep(keys, True))
+        m.add_separator()
         m.add_command(label='Відв\'язати від однакових', command=lambda: self._detach(keys))
         m.add_command(label='Прив\'язати до однакових', command=lambda: self._attach(keys))
         m.add_separator()
@@ -962,6 +1023,14 @@ class Editor(tk.Toplevel):
         self.node = 'all'
         self._fill_nodes()
         self._refill()
+
+    def _keep(self, keys, on):
+        """«Не перекладати»: рядок (і однакові пов'язані) лишається оригіналом — не йде
+        у відсоток, слова й «Неперекладені»; переклад, якщо був, лишається як є."""
+        self._commit()
+        changed = self.pr.set_keep(keys, on)
+        self._after_bulk(keys + changed, 'Позначено «не перекладати»' if on else 'Повернуто до перекладу')
+        self._count(self.view)
 
     def _detach(self, keys):
         self._commit()
@@ -1187,6 +1256,21 @@ class Editor(tk.Toplevel):
         self._refill()
         self.ctx = None
         threading.Thread(target=self._load_bg, daemon=True).start()
+
+    def _set_ontop(self):
+        """Редактор поверх усіх вікон; вибір запам'ятовується (settings.json)."""
+        on = self.ontop.get()
+        self.attributes('-topmost', on)
+        settings = getattr(self.app, 'settings', None)
+        if settings is not None:
+            settings['editor_ontop'] = on
+            try:
+                import importlib
+                save = getattr(importlib.import_module('__main__'), 'save_settings', None)
+                if save:
+                    save(settings)
+            except Exception:                                   # noqa: BLE001
+                pass
 
     def _watch_window(self):
         """«Гра на екрані»: які рядки зараз у грі (screenwatch_window.py)."""

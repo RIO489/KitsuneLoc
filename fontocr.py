@@ -29,9 +29,16 @@ DARK = 0.35            # поруч має бути темне (обведенн
 
 def text_mask(gray):
     """Маска пікселів, схожих на текст: світлі, а поруч (5×5) — темне."""
-    im = Image.fromarray((gray * 255).astype(np.uint8))
-    mn = np.asarray(im.filter(ImageFilter.MinFilter(5)), dtype=np.float32) / 255
-    return (gray > BRIGHT) & (mn < DARK)
+    # «темне поруч» — на зменшеному вдвічі (мінімум 2×2, потім 3×3 ≈ окіл 6×6): фільтр
+    # мінімуму на повному кадрі 1600×900 був найдорожчим кроком пошуку рядків
+    h, w = gray.shape
+    h2, w2 = h - h % 2, w - w % 2
+    g2 = gray[:h2, :w2].reshape(h2 // 2, 2, w2 // 2, 2).min(axis=(1, 3))
+    im = Image.fromarray((g2 * 255).astype(np.uint8))
+    mn2 = np.asarray(im.filter(ImageFilter.MinFilter(3)), dtype=np.float32) / 255
+    near = np.ones((h, w), dtype=bool)
+    near[:h2, :w2] = np.repeat(np.repeat(mn2 < DARK, 2, axis=0), 2, axis=1)
+    return (gray > BRIGHT) & near
 
 
 def _components(mask):
@@ -60,6 +67,55 @@ def _components(mask):
     return out
 
 
+def _components_runs(mask):
+    """Те саме, що _components, але з горизонтальних відрізків: відрізки сусідніх рядків,
+    що перекриваються, — одна область (об'єднання-пошук). Кроків — за відрізками,
+    а не за пікселями: у кілька разів швидше."""
+    h, w = mask.shape
+    pad = np.zeros((h, w + 2), dtype=np.int8)
+    pad[:, 1:-1] = mask
+    d = np.diff(pad, axis=1)
+    ys_s, xs_s = np.nonzero(d == 1)                       # початки відрізків (x включно)
+    ys_e, xs_e = np.nonzero(d == -1)                      # кінці (x не включно)
+    runs = list(zip(ys_s.tolist(), xs_s.tolist(), xs_e.tolist()))   # у порядку рядків і x
+    parent = list(range(len(runs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    by_row = {}
+    for i, (y, a, b) in enumerate(runs):
+        by_row.setdefault(y, []).append(i)
+    for y, cur in by_row.items():
+        prev = by_row.get(y - 1)
+        if not prev:
+            continue
+        j = 0
+        for i in cur:
+            a, b = runs[i][1], runs[i][2]
+            while j < len(prev) and runs[prev[j]][2] <= a:
+                j += 1
+            k = j
+            while k < len(prev) and runs[prev[k]][1] < b:
+                ri, rk = find(i), find(prev[k])
+                if ri != rk:
+                    parent[ri] = rk
+                k += 1
+    comp = {}
+    for i, (y, a, b) in enumerate(runs):
+        r = find(i)
+        c = comp.get(r)
+        if c is None:
+            comp[r] = [y, a, y, b, b - a]
+        else:
+            c[0] = min(c[0], y); c[1] = min(c[1], a); c[2] = max(c[2], y); c[3] = max(c[3], b)
+            c[4] += b - a
+    return [(y0, x0, y1 + 1, x1, n) for y0, x0, y1, x1, n in comp.values()]
+
+
 def lines(gray, min_h=10, max_h=90):
     """Рамки рядків тексту [(x0, y0, x1, y1)] на сірому кадрі (float 0..1).
     Шукаємо на зменшеній удвічі масці, злитій по горизонталі (букви -> слова ->
@@ -74,7 +130,7 @@ def lines(gray, min_h=10, max_h=90):
     wide = (cs[:, 2 * run:] - cs[:, :-2 * run]) > 0
     wide = wide[:, :small.shape[1]]
     out = []
-    for y0, x0, y1, x1, n in _components(wide):
+    for y0, x0, y1, x1, n in _components_runs(wide):
         Y0, Y1, X0, X1 = y0 * k, y1 * k, x0 * k, x1 * k
         sub = m[Y0:Y1, X0:X1]
         rows = np.nonzero(sub.any(axis=1))[0]
@@ -89,8 +145,42 @@ def lines(gray, min_h=10, max_h=90):
         if sub.sum() < hh * 3:                           # надто рідко — не текст
             continue
         out.append((int(X0), int(Y0), int(X1), int(Y1)))
-    out.sort(key=lambda b: (b[1], b[0]))
-    return out
+    return _join_row(out)
+
+
+def _join_row(boxes, gap_k=1.3):
+    """Рамки на одній висоті з проміжком менше gap_k висот — один рядок. Злиття
+    вище бере проміжки до ~16 px, а подвійний пробіл перекладача («пафосу...  уже»)
+    чи ширший проміжок — 17–25 px: рядок розпадався на шматки, і пошук бачив лише слова.
+    Колонки меню («Англійська» | «Японська», ~90 px) лишаються окремими."""
+    boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
+    changed = True
+    while changed:
+        changed = False
+        boxes.sort(key=lambda b: (b[0], b[1]))
+        for i, a in enumerate(boxes):
+            for j in range(i + 1, len(boxes)):
+                b = boxes[j]
+                h = min(a[3] - a[1], b[3] - b[1])
+                over = min(a[3], b[3]) - max(a[1], b[1])
+                gap = b[0] - a[2]
+                if over >= 0.6 * h and -2 <= gap < gap_k * h:
+                    boxes[i] = (a[0], min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
+                    del boxes[j]
+                    changed = True
+                    break
+            if changed:
+                break
+    boxes.sort(key=lambda b: (b[1], b[0]))
+    return boxes
+
+
+def _content(gray, box):
+    """Відбиток вмісту рамки (грубо: 16 рівнів яскравості) — ключ пам'яті прочитаного."""
+    import hashlib
+    x0, y0, x1, y1 = box
+    q = (gray[y0:y1, x0:x1] * 15.99).astype(np.uint8)
+    return hashlib.blake2b(q.tobytes(), digest_size=12).digest()
 
 
 # ------------------------------------------------------------------ читання
@@ -158,6 +248,7 @@ class Reader:
         self.space = (sp[0] if sp else font.cell_h // 3) * k
         self.track_hint = None                  # розрядка, знайдена на попередніх рядках
         self.start_mean = -2.0
+        self.start_alts = []
 
     def scores(self, G, cy, ox):
         """Кореляція кожного гліфа, поставленого клітинкою в (ox, cy) робочого кадру."""
@@ -220,6 +311,7 @@ class Reader:
             coarse += [(float(v), cy, ox) for v, ox in zip(sc, oxs)]
         coarse.sort(reverse=True)
         self.start_mean = -2.0
+        self.start_alts = []
         if not coarse or coarse[0][0] < START_MIN:
             # жодна буква тут не схожа — шум малюнка; далі не читаємо (це найдорожче)
             v, cy, ox = coarse[0] if coarse else (-2.0, 0, 0)
@@ -238,7 +330,7 @@ class Reader:
         cands.sort(reverse=True)
         # перша буква окремо обманлива («І» — перший штрих «Щ»): беремо той
         # початок, з якого найкраще читаються кілька перших букв
-        best, best_m = (-2.0, 0, 0, 0), -2.0
+        ranked = []
         seen = set()
         for c in cands:
             if len(seen) >= 6 or c[0] < 0.5:
@@ -248,8 +340,15 @@ class Reader:
             seen.add((c[3], c[1]))
             _t, m, _e, _p = self.decode(G, c[1], c[2], c[3], c[0], x1, beam=2, limit=4,
                                     track=self.track_hint or 0.0)
-            if m > best_m:
-                best, best_m = c, m
+            ranked.append((m, c))
+        if not ranked:
+            self.start_alts = []
+            return (-2.0, 0, 0, 0)
+        ranked.sort(key=lambda r: -r[0])
+        best_m, best = ranked[0]
+        # друга за якістю перша буква (інша) — read() дочитає обидві й вибере за line_score:
+        # «ІІJо» і «Що» за першими буквами майже рівні, а цілим рядком — ні
+        self.start_alts = [c for m, c in ranked[1:] if c[3] != best[3] and m >= best_m - 0.06][:1]
         self.start_mean = best_m                 # як добре читаються перші букви (вибір масштабу)
         return best
 
@@ -271,7 +370,8 @@ class Reader:
                 if self.ink(G, cy, p, x1 + 1) < BRIGHT:          # далі чорнила немає — кінець
                     done.append((True, tot / n, ''.join(text), pos))
                     continue
-                if self.ink(G, cy, p + 1, p + self.space - 1) < BRIGHT and text[-1] != ' ':
+                # кілька пробілів поспіль бувають (перекладач ставить подвійний), але не безмежно
+                if self.ink(G, cy, p + 1, p + self.space - 1) < BRIGHT and text[-3:] != [' '] * 3:
                     nxt.append((tot + 0.9, text + [' '], p + self.space, n + 1, pos))
                 cand = []
                 ds = [d for d in range(-2, 3)                   # порожньо — не буква
@@ -351,7 +451,13 @@ class Reader:
             return tried[track]
 
         # без розрядки; розрядка цього масштабу, знайдена раніше (меню); підбір
-        if attempt(0.0)[0] >= LINE_GOOD:
+        attempt(0.0)
+        for av, acy, aox, ai in self.start_alts:          # інша перша буква — цілим рядком
+            text, _mean, end, pos = self.decode(G, acy, aox, ai, av, x1)
+            sc = self.line_score(G, acy, pos, box) if end else -1.0
+            if sc > tried[0.0][0]:
+                tried[0.0] = (sc, text)
+        if tried[0.0][0] >= LINE_GOOD:
             return tried[0.0][1], tried[0.0][0]
         if self.track_hint and attempt(self.track_hint)[0] >= LINE_GOOD:
             return tried[self.track_hint][1], tried[self.track_hint][0]
@@ -399,6 +505,8 @@ class FontOCR:
         self.frame_h = None
         self.frame_no = 0
         self.failed = {}                        # рамка (грубо) -> кадр, де підбір не вдався
+        self.memo = {}                          # (рамка, вміст) -> прочитане: той самий рядок не читаємо двічі
+        self.memo_known = None
         # висота «чорнила» рядка в клітинці (від верху великих до низу хвостиків)
         self.ink_h = {}
         for name, f in fonts.items():
@@ -522,7 +630,15 @@ class FontOCR:
             self.frame_h, self.known = gray.shape[0], []
         self._cache = {}
         boxes = lines(gray)
-        got = {b: self._best(gray, b) for b in boxes}
+        # між кадрами більшість рядків та сама (меню — рухається лише курсор; діалог — лише
+        # репліка; хибні рамки малюнка ті самі): прочитане пам'ятаємо за вмістом рамки
+        if self.memo_known != self.known:        # нові масштаби — стара пам'ять неповна
+            self.memo, self.memo_known = {}, list(self.known)
+        keys = {b: (b, _content(gray, b)) for b in boxes}
+        got = {}
+        for b in boxes:
+            m = self.memo.get(keys[b])
+            got[b] = m if m is not None else self._best(gray, b)
         todo = [b for b in boxes if got[b][1] < GOOD and (b[2] - b[0]) >= 2.5 * (b[3] - b[1])]
         todo.sort(key=lambda b: -(b[2] - b[0]))
         # масштаби вже є і кадр читається — не шукаємо нових на кожному кадрі (шум малюнка
@@ -531,14 +647,18 @@ class FontOCR:
         self.frame_no += 1
         todo = [b for b in todo if self.failed.get(self._geo(b), -10**9) < self.frame_no - COOLDOWN]
         read_some = any(g[1] >= GOOD for g in got.values())
-        t_end = time.time() + (30.0 if not self.known else 0.4 if read_some else budget)
+        if read_some and self.frame_no % 10:
+            # кадр і так читається (діалог) — інший масштаб (табличка імені) шукаємо
+            # лише раз на 10 кадрів: підбір — найдорожче, а шум малюнка щоразу «непрочитаний»
+            todo = []
+        t_end = time.time() + (30.0 if not self.known else budget)
         for b in todo[:max_search]:
             if time.time() > t_end:
                 break
             if got[b][1] >= GOOD:                # уже прочитано новим масштабом
                 continue
             fs = self._search(gray, b, t_end)
-            if not fs and time.time() <= t_end:
+            if not fs:                           # і не вклався в час — теж: інакше щокадру наново
                 self.failed[self._geo(b)] = self.frame_no
             if fs and fs not in self.known:
                 self.known.append(fs)
@@ -547,6 +667,11 @@ class FontOCR:
                         t, m = self._read_with(gray, bb, *fs)
                         if m > got[bb][1] and plausible(t):
                             got[bb] = (t, m, fs)
+        if self.memo_known == self.known:
+            if len(self.memo) > 4000:
+                self.memo = {}
+            for b in boxes:
+                self.memo[keys[b]] = got[b]
         out = []
         for b in boxes:
             t, m, fs = got[b]

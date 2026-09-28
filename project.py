@@ -25,6 +25,8 @@ import common as locfile
 import sheets
 
 STORE = 'переклад.json'
+_CODES = re.compile(r'#[A-Za-z]+(?:\[[^\]]*\])?|%[-+0#]*\d*(?:\.\d+)?(?:ll|l|h)?[a-zA-Z%]|<[A-Z]+>|\{[^}]*\}')
+_WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
 SNAPSHOT = '_excel_знімок.json'     # у work\<гра>: що було в книгах на час вивантаження
 VERSION = 1
 
@@ -96,6 +98,7 @@ class Project:
                 e.pop('note', None)
             e.pop('auto', None)             # «перевір» з книг тут не потрібне
             r['окремо'] = bool(got.get('окремо'))
+            r['лишити'] = bool(got.get('лишити'))
 
     # ------------------------------------------------------------ рядки
     def tr(self, k):
@@ -271,21 +274,61 @@ class Project:
         if keys is None or any(self.by_key[k]['kind'] == 'name' for k in keys):
             self.__dict__.pop('_spk', None)
 
+    # ------------------------------------------------------------ не перекладати
+    def set_keep(self, keys, on):
+        """«Не перекладати» (лишити оригінал): назви, «CPU», коди… Діє й на пов'язані
+        однакові рядки. Такі рядки не йдуть у відсоток і слова; у грі — оригінал
+        (порожній переклад = оригінал). Повертає змінені ключі."""
+        changed = []
+        for k in keys:
+            for x in self.linked(k):
+                r = self.by_key[x]
+                if bool(r.get('лишити')) != on:
+                    r['лишити'] = on
+                    changed.append(x)
+        if changed:
+            self._touched = True
+        return changed
+
     # ------------------------------------------------------------ прогрес
+    @staticmethod
+    def counted(r):
+        """Чи рядок іде в прогрес: не службовий ключ, оригінал не порожній (коротка назва —
+        необов'язкова), не позначений «не перекладати»."""
+        return r['kind'] != 'key' and bool(r['e']['src']) and not r.get('лишити')
+
+    @staticmethod
+    def words(r):
+        """Слів в оригіналі рядка (так міряють обсяг перекладу); коди #n, %s — не слова."""
+        n = r.get('_words')
+        if n is None:
+            n = r['_words'] = len(_WORD.findall(_CODES.sub(' ', r['e']['src'])))
+        return n
+
+    def stats(self, rows):
+        """{'rows', 'done', 'words', 'words_done'} для набору рядків (лише ті, що рахуються)."""
+        rows = [r for r in rows if self.counted(r)]
+        done = [r for r in rows if r['e'].get('tr')]
+        return {'rows': len(rows), 'done': len(done),
+                'words': sum(map(self.words, rows)), 'words_done': sum(map(self.words, done))}
+
     def progress(self):
         """Як sheets.progress: по «книгах» (імена — кожне один раз; службові ключі не рахуються)."""
         books = []
-        done = total = 0
+        done = total = words = words_done = 0
         for name, scenes in self.books().items():
-            # порожній оригінал (коротка назва) — необов'язковий рядок, у відсоток не йде
-            rows = [r for rs in scenes.values() for r in rs if r['kind'] != 'key' and r['e']['src']]
-            if not rows:
+            # порожній оригінал (коротка назва) і «не перекладати» — у відсоток не йдуть
+            st = self.stats([r for rs in scenes.values() for r in rs])
+            if not st['rows']:
                 continue
-            d = sum(1 for r in rows if r['e'].get('tr'))
-            books.append({'book': name, 'done': d, 'total': len(rows), 'auto': 0})
-            done += d
-            total += len(rows)
-        return {'books': books, 'done': done, 'total': total, 'auto': 0, 'prev': None}
+            books.append({'book': name, 'done': st['done'], 'total': st['rows'], 'auto': 0,
+                          'words': st['words'], 'words_done': st['words_done']})
+            done += st['done']
+            total += st['rows']
+            words += st['words']
+            words_done += st['words_done']
+        return {'books': books, 'done': done, 'total': total, 'auto': 0, 'prev': None,
+                'words': words, 'words_done': words_done}
 
     # ------------------------------------------------------------ зберігання
     def save(self):
@@ -300,6 +343,8 @@ class Project:
                 d['note'] = e['note']
             if r.get('окремо'):
                 d['окремо'] = True
+            if r.get('лишити'):
+                d['лишити'] = True
             if d:
                 rows[k] = d
         st = dict(self.meta)

@@ -230,8 +230,8 @@ class WatchWindow(tk.Toplevel):
 
     def _state(self, key, kind):
         e = self.pr.by_key[key]['e']
-        if kind == 'tr':
-            return 'ok'
+        if kind == 'tr' or self.pr.by_key[key].get('лишити'):
+            return 'ok'                              # «не перекладати» — оригінал у грі і є правильний
         if kind == 'game':
             return 'stale'
         tr = e.get('tr', '')

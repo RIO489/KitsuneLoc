@@ -403,6 +403,10 @@ def match(index, lines, min_ratio=0.62, near=()):
     return hits
 
 
+SAME = 1.5             # середня різниця кадрів 64×36 (0..255), до якої кадр «той самий»
+STABLE_GAP, STABLE_TRIES = 0.25, 6     # очікування, поки репліка «додрукується»: до 1,5 с
+
+
 class Watcher(threading.Thread):
     """Фоновий цикл: кадр -> OCR -> пошук. on_frame(стан, картинка, влучання),
     стан — 'nogame' | 'same' | 'ok' | 'err:<текст>'. OCR — лише тоді, коли кадр
@@ -438,14 +442,30 @@ class Watcher(threading.Thread):
                 self.near.insert(0, src)
         del self.near[2:]
 
-    def _changed(self, img):
-        data = img.convert('L').resize((64, 36)).tobytes()
-        if self.last is not None:
-            diff = sum(abs(a - b) for a, b in zip(data, self.last)) / len(data)
-            if diff <= 1.5:
-                return False
-        self.last = data
-        return True
+    @staticmethod
+    def _small(img):
+        import numpy as np
+        return np.asarray(img.convert('L').resize((64, 36)), dtype=np.int16)
+
+    @staticmethod
+    def _diff(a, b):
+        return float(abs(a - b).mean())
+
+    def _settle(self, hwnd, img, small):
+        """Гра «друкує» репліку по букві: чекаємо, поки кадр перестане змінюватись
+        (не довше STABLE_TRIES × STABLE_GAP) — щоб не розпізнавати кожен проміжний."""
+        for _ in range(STABLE_TRIES):
+            if self.stop_ev.wait(STABLE_GAP):
+                break
+            img2 = grab(hwnd)
+            if img2 is None:
+                break
+            s2 = self._small(img2)
+            still = self._diff(s2, small) <= SAME
+            img, small = img2, s2
+            if still:
+                break
+        return img, small
 
     def run(self):
         hwnd, seen = None, 0.0
@@ -456,12 +476,15 @@ class Watcher(threading.Thread):
                     if hwnd is None or not _u32.IsWindow(hwnd) or t0 - seen > 5:
                         hwnd, seen = find_window(self.exe), t0
                     img = grab(hwnd) if hwnd else None
+                    small = self._small(img) if img is not None else None
                     if img is None:
                         self.last = None
                         self.on_frame('nogame', None, [])
-                    elif not self._changed(img):
+                    elif self.last is not None and self._diff(small, self.last) <= SAME:
                         self.on_frame('same', None, None)
                     else:
+                        img, small = self._settle(hwnd, img, small)
+                        self.last = small
                         lines = self.ocr.lines(img)
                         if self.save_dir:
                             self._save(img, lines)
