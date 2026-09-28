@@ -78,7 +78,11 @@ class GameFont:
         return got
 
     def clean(self, line):
-        return self.code_re.sub('', line)
+        line = self.code_re.sub('', line)
+        if self.game == 'nep':              # ’ -> ', … -> ... — як запише імпорт
+            from neptunia import chars
+            line = chars.plain(line)
+        return line
 
 
 def render(font, text, limit, max_lines=None, name=None, dialog=False):

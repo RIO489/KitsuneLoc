@@ -32,6 +32,7 @@ class FeedbackWindow(tk.Toplevel):
         self._fill_shots()
         self._restore_draft()
         self._key_state()
+        self._validate()
         self.protocol('WM_DELETE_WINDOW', self._close)
         # Ctrl+V за будь-якої розкладки (keycode 86): картинку з буфера — у знімки;
         # текст у полі вставляє tkkeys, як завжди
@@ -83,7 +84,17 @@ class FeedbackWindow(tk.Toplevel):
             ttk.Checkbutton(rf, text='Додати цей рядок до звернення', variable=self.with_row).pack(
                 anchor='w', padx=10, pady=(2, 8))
 
+        nf = ttk.Frame(self)
+        nf.pack(fill='x', padx=14, pady=(8, 0))
+        ttk.Label(nf, text='Твоє ім\'я або нік:').pack(side='left')
+        self.nick = tk.StringVar(value=feedback.load_nick())
+        ttk.Entry(nf, textvariable=self.nick, width=24).pack(side='left', padx=8)
+        ttk.Label(nf, text='(необов\'язково — щоб знати, кому дякувати)',
+                  style='Hint.TLabel').pack(side='left')
+
         self.what = self._text('Що не так? (обов\'язково)', 5)
+        self.what.bind('<KeyRelease>', lambda e: self._validate(), add='+')
+        self.what.bind('<<Paste>>', lambda e: self.after(50, self._validate), add='+')
         self.how = self._text('Як мало бути? (якщо знаєш)', 3)
 
         wf = ttk.Frame(self)
@@ -305,6 +316,7 @@ class FeedbackWindow(tk.Toplevel):
     def _report(self):
         g = self.game_names.get(self.game.get(), '')
         r = {'тип': self.kind.get(), 'гра': g, 'назва гри': self.game.get() if g else '',
+             'нік': ' '.join(self.nick.get().split())[:feedback.NICK_MAX],
              'що': self.what.get('1.0', 'end-1c').strip(),
              'як': self.how.get('1.0', 'end-1c').strip(), 'де': self.where.get().strip()}
         if self.with_row.get() and self.ctx.get('row'):
@@ -331,10 +343,16 @@ class FeedbackWindow(tk.Toplevel):
         if self.sending:
             return
         r = self._report()
-        if not r['що']:
-            self.status.set('Напиши, будь ласка, що не так — хоч одне речення.')
+        why = feedback.problem(r)
+        if why:
+            self.status.set(why)
             self.what.focus_set()
             return
+        left = feedback.wait_left()
+        if left:
+            self.status.set(f'Попереднє звернення щойно пішло — зачекай ще {left} с.')
+            return
+        feedback.save_nick(r['нік'])
         images = [s[0] for s in self.shots if s[1].get()]
         try:
             d = feedback.enqueue(r, images)
@@ -342,6 +360,7 @@ class FeedbackWindow(tk.Toplevel):
             messagebox.showerror('Звернення', f'Не вдалося зберегти звернення: {ex}', parent=self)
             return
         feedback.drop_draft()
+        feedback.mark_sent_now()
         self._sent = True
         if not feedback.load_key():
             self.app.say('Звернення збережено; надішлеться, щойно підключиш відправку '
@@ -384,6 +403,17 @@ class FeedbackWindow(tk.Toplevel):
                      'надішлю ще раз при наступному запуску.', 'err')
         if self.winfo_exists():
             self.destroy()
+
+    def _validate(self):
+        """«Надіслати» доступна, лише коли в «Що не так» є що читати."""
+        if self.sending:
+            return
+        why = feedback.problem({'що': self.what.get('1.0', 'end-1c')})
+        self.b_send.state(['disabled'] if why else ['!disabled'])
+        if why:
+            self.status.set(why)
+        elif self.status.get() in (feedback.problem({'що': ''}), feedback.problem({'що': 'а'})):
+            self.status.set('')
 
     # ------------------------------------------------------------------ ключ
     def _key_state(self):

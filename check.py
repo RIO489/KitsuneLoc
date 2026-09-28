@@ -94,7 +94,8 @@ def check_nep():
         f = Ffu(data)
         assert all(f.index(v) is not None for v in chars.CODE.values()), fn
         assert not rep['missing'], rep
-    print('OK  шрифти: 66 українських літер у кожному')
+        assert rep['quotes'] == 2 and all(f.glyph(v) for v in chars.QUOTES.values()), fn
+    print('OK  шрифти: 66 українських літер і « » у кожному')
     from neptunia.tid import Tid
     from neptunia import atlas as natl
     blob = Pac(t._orig(ns, t.MAIN)).read('menu/item/title.tid')

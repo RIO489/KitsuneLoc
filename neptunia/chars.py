@@ -18,13 +18,39 @@ assert len(UPPER + LOWER) == len(_CODES) == 66
 CODE = dict(zip(UPPER + LOWER, _CODES))      # літера -> байт
 LETTER = {v: k for k, v in CODE.items()}     # байт -> літера
 
+# « » — у два вільні однобайтові коди Shift-JIS (не початок двобайтового символу);
+# fontfix малює там кутики в стилі шрифту. 《 》 перекладача — окремі символи, як були.
+QUOTES = {'«': 0x80, '»': 0xA0}
+LETTER.update({v: k for k, v in QUOTES.items()})
+
 # літери, яких у схемі немає: пишемо найближчою наявною
 FALLBACK = {'Ъ': 'Ь', 'ъ': 'ь', 'Ы': 'И', 'ы': 'и', 'Э': 'Є', 'э': 'є',
-            'Ё': 'Е', 'ё': 'е', 'ʼ': "'", '’': "'", '‘': "'", '«': '"', '»': '"',
+            'Ё': 'Е', 'ё': 'е', 'ʼ': "'", '’': "'", '‘': "'",
             '“': '"', '”': '"', '„': '"', '—': '-', '–': '-', '…': '...',
             ' ': ' ',
             # сердечка в Shift-JIS немає: fontfix малює ♡ у слоті ∵
             '♡': '∵', '♥': '∵', '❤': '∵'}
+
+
+# Є в cp932, але двобайтові: головне вікно діалогу дає їм ширину ієрогліфа —
+# апостроф з широким проміжком. Пишемо однобайтовими, хоч cp932 їх і має.
+PREFER = {'’': "'", '‘': "'", '…': '...'}
+
+
+def _halfwidth(ch):
+    """Півширинна катакана (｢ ｡ ･ ﾟ…) у cp932 однобайтова — тобто потрапила б у
+    слоти нашої кирилиці. Пишемо повноширинною (｢ -> 「)."""
+    import unicodedata
+    if not '｡' <= ch <= 'ﾟ':
+        return None
+    # ﾞ ﾟ після NFKC — комбіновані знаки, яких у cp932 немає
+    return {'ﾞ': '゛', 'ﾟ': '゜'}.get(ch) or unicodedata.normalize('NFKC', ch)
+
+
+def plain(text):
+    """Текст таким, яким його побачить гра: замість ’ … ｢ — те, що запишемо
+    (для прев'ю й ширини: `…` у грі — три крапки, а не один широкий знак)."""
+    return ''.join(PREFER.get(ch) or _halfwidth(ch) or ch for ch in text)
 
 
 RAW = 0xF700          # байт, якого немає в cp932, у тексті = chr(RAW + байт)
@@ -34,12 +60,16 @@ def encode(text, errors='strict'):
     """Рядок -> байти гри (cp932 + наші однобайтові літери)."""
     out = bytearray()
     for ch in text:
-        b = CODE.get(ch)
+        b = CODE.get(ch) or QUOTES.get(ch)
         if b is not None:
             out.append(b)
             continue
         if RAW <= ord(ch) < RAW + 256:
             out.append(ord(ch) - RAW)
+            continue
+        alt = PREFER.get(ch) or _halfwidth(ch)
+        if alt is not None and alt != ch:
+            out += encode(alt, errors)
             continue
         try:
             out += ch.encode('cp932')
@@ -58,7 +88,7 @@ def bad_chars(text):
     """Символи, яких гра не покаже (немає ні в cp932, ні в нашій схемі)."""
     bad = set()
     for ch in text or '':
-        if ch in CODE or ch in FALLBACK or RAW <= ord(ch) < RAW + 256:
+        if ch in CODE or ch in QUOTES or ch in FALLBACK or RAW <= ord(ch) < RAW + 256:
             continue
         try:
             ch.encode('cp932')

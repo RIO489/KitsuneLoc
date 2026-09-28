@@ -61,7 +61,7 @@ def _build(game, path, font='msg'):
             continue
         if len(ch) == 1:
             tab.setdefault(ch, f.entries[i][0])
-    for ch, code in chars.CODE.items():               # українські літери — однобайтові слоти
+    for ch, code in list(chars.CODE.items()) + list(getattr(chars, "QUOTES", {}).items()):  # укр. літери, « »
         i = f.index(code)
         if i is not None:
             tab[ch] = f.entries[i][0]
@@ -114,5 +114,8 @@ def _code_sig():
 def width(line, tab, game):
     """Ширина одного рядка в пікселях (службові коди не рахуються)."""
     line = (_MSK_CODE if game == 'msk' else _NEP_CODE).sub('', line)
+    if game == 'nep':                   # ’ -> ', … -> ... — як запише імпорт
+        from neptunia import chars
+        line = chars.plain(line)
     avg = tab.get('n') or 12
     return sum(tab.get(ch, avg) for ch in line)

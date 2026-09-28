@@ -20,7 +20,9 @@ import re
 from . import chars
 from .gbnl import STRING, U32
 
-_GREEK = {'Α': 'І', 'Β': 'Ї', 'Γ': 'Ґ', 'Δ': 'Є', 'α': 'і', 'β': 'ї', 'γ': 'ґ', 'δ': 'є'}
+# і ї є ґ у файлах Crowdin — грецькими; « » (у cp932 їх немає) — як ≪ ≫
+_GREEK = {'Α': 'І', 'Β': 'Ї', 'Γ': 'Ґ', 'Δ': 'Є', 'α': 'і', 'β': 'ї', 'γ': 'ґ', 'δ': 'є',
+          '≪': '«', '≫': '»'}
 GREEK = str.maketrans(_GREEK)
 TO_GREEK = str.maketrans({v: k for k, v in _GREEK.items()})
 _SEP = re.compile(r'^―{8,} (\S+)\s*$')

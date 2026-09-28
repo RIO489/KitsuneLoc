@@ -11,7 +11,8 @@
   3. домальовуємо і І ї Ї є Є ґ Ґ з гліфів самого шрифту (i, I, ё/Ё, э/Э, г/Г),
      з урахуванням нахилу курсивного шрифту;
   4. кладемо все в однобайтові слоти (neptunia/chars.py): 0xA1–0xDF і новий
-     діапазон 0xFD–0xFF. Латиниця й решта шрифту — байт у байт оригінальні.
+     діапазон 0xFD–0xFF. Латиниця й решта шрифту — байт у байт оригінальні;
+  5. малюємо « » у нові однобайтові коди 0x80 / 0xA0 (chars.QUOTES).
 
 Висота гліфа й рядки не змінюються — базова лінія та сама, що в оригіналі.
 """
@@ -253,6 +254,45 @@ def _heart(f):
     return True
 
 
+def _guillemet(f, right, slant):
+    """« або » у стилі шрифту: два кутики заввишки ~0.7 малої літери, по центру
+    висоти малих літер, товщина штриха — як у «<» цього шрифту, нахил — як у
+    курсиву. ≪ ≫ з Shift-JIS для цього завеликі (на всю висоту великої)."""
+    import math
+    from PIL import Image, ImageDraw
+    a, el = f.glyph(ord('a')), f.glyph(ord('l'))
+    if not a or not el:
+        return None
+    rows_a = a[1]
+    h, w_cell = len(rows_a), len(rows_a[0])
+    ab = _bbox(rows_a)
+    xh = ab[3] - ab[2] + 1                                  # висота малої літери
+    # товщина штриха — як вертикаль «l» (у похилому шрифті «<» тонший за літери)
+    eb = _bbox(el[1])
+    mid = el[1][(eb[2] + eb[3]) // 2]
+    stroke = max(1.3, min(4.5, sum(mid) / 15 * 0.7))
+    ch = xh * 0.75                                          # висота кутика
+    cw = ch * 0.55                                          # ширина кутика
+    gap = ch * 0.6                                          # крок між кутиками
+    S = 8
+    W = w_cell + 8
+    im = Image.new('L', (W * S, h * S), 0)
+    d = ImageDraw.Draw(im)
+    cy = (ab[2] + ab[3] + 1) / 2                            # центр малих літер
+    x0 = 2 + stroke / 2
+    for k in range(2):
+        xs = x0 + k * gap
+        if right:
+            pts = [(xs, cy - ch / 2), (xs + cw, cy), (xs, cy + ch / 2)]
+        else:
+            pts = [(xs + cw, cy - ch / 2), (xs, cy), (xs + cw, cy + ch / 2)]
+        d.line([(x * S, y * S) for x, y in pts], fill=255, width=max(1, round(stroke * S)),
+               joint='curve')
+    im = im.resize((W, h), Image.LANCZOS)
+    rows = [[min(15, (im.getpixel((x, y)) + 8) // 17) for x in range(W)] for y in range(h)]
+    return _shear(rows, slant, ab[3]) if abs(slant) > 0.01 else rows
+
+
 def italic_sysfont(sys_data, msg_data):
     """Похилий шрифт меню, як у старій схемі перекладу: гліфи й діапазони —
     з msgfont (похилий «квадратний» стиль), службовий заголовок (0x428 Б, з
@@ -278,6 +318,16 @@ def fix(data):
     lb_up, rb_up = _metrics(f, 'ABCDEFGHKLMNOPRSTUVXZ')
     if f.index(0xFD) is None:
         f.add_range(0xFD, 0x100)
+    quotes = 0
+    for ch, code in chars.QUOTES.items():                  # « » — у вільні однобайтові коди
+        if f.index(code) is None:
+            f.add_range(code, code + 1)
+        rows = _guillemet(f, ch == '»', slant)
+        if rows:
+            new, w = _crop(rows, lb_lo)
+            if new is not None:
+                f.set_glyph_at(f.index(code), new, lb_lo + w + rb_lo)
+                quotes += 1
     src = _sources(f, slant)
     done = []
     # однобайтові слоти — основна схема; двобайтові коди — для тексту, який
@@ -299,7 +349,7 @@ def fix(data):
         f.set_glyph_at(i, new, lb + w + rb)
         if code in chars.LETTER:
             done.append(ch)
-    rep = {'letters': len(done), 'slant': round(slant, 3), 'heart': _heart(f),
+    rep = {'letters': len(done), 'slant': round(slant, 3), 'heart': _heart(f), 'quotes': quotes,
            'bearings': (lb_lo, rb_lo, lb_up, rb_up),
            'missing': [c for c in chars.CODE if c not in done]}
     return f.build(), rep

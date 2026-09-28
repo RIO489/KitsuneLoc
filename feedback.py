@@ -21,6 +21,11 @@ QUEUE = os.path.join(DIR, 'черга')
 SENT = os.path.join(DIR, 'надіслано')
 DRAFT = os.path.join(DIR, 'чернетка.json')
 HIDDEN = os.path.join(DIR, 'приховані знімки.json')
+NICK = os.path.join(DIR, 'нік.txt')
+LAST = os.path.join(DIR, 'останнє надсилання.txt')
+MIN_WHAT = 8            # «Що не так»: щонайменше стільки літер/цифр — інакше це не звернення
+SEND_GAP = 60           # с між зверненнями з одного ПК (захист від випадкового спаму)
+NICK_MAX = 32
 LOGFILE = os.path.join(HERE, 'лог.txt')
 
 # тип звернення -> (підпис, колір значка теми; Telegram дозволяє лише ці шість)
@@ -353,7 +358,8 @@ def _one_line(s, n):
 
 def topic_title(r):
     kind = KINDS.get(r.get('тип'), ('Звернення',))[0]
-    head = f'[{GAME_TAGS.get(r.get("гра", ""), r.get("гра", ""))}] {kind}: '
+    who = f' ({r["нік"]})' if r.get('нік') else ''
+    head = f'[{GAME_TAGS.get(r.get("гра", ""), r.get("гра", ""))}] {kind}{who}: '
     return _one_line(head + (r.get('що') or r.get('де') or ''), TOPIC_MAX)
 
 
@@ -361,6 +367,8 @@ def message_html(r):
     e = html.escape
     kind = KINDS.get(r.get('тип'), ('Звернення',))[0]
     parts = [f'<b>{e(kind)}</b> · {e(r.get("назва гри") or "програма загалом")}']
+    if r.get('нік'):
+        parts[0] += f' · від <b>{e(r["нік"])}</b>'
     for label, key in (('Що не так', 'що'), ('Як мало бути', 'як'), ('Де в грі', 'де')):
         if (r.get(key) or '').strip():
             parts.append(f'<b>{label}:</b>\n{e(r[key].strip())}')
@@ -386,6 +394,8 @@ def message_html(r):
 def details_text(r):
     """Усе звернення текстом — файлом до теми (довге, лог, рядок повністю)."""
     out = [topic_title(r), '']
+    if r.get('нік'):
+        out += [f'Від: {r["нік"]}', '']
     for label, key in (('Що не так', 'що'), ('Як мало бути', 'як'), ('Де в грі', 'де')):
         if (r.get(key) or '').strip():
             out += [f'{label}:', r[key].strip(), '']
@@ -483,6 +493,56 @@ def flush(say=None):
 
 
 # --------------------------------------------------------------- чернетка
+def load_nick():
+    try:
+        return open(NICK, encoding='utf-8').read().strip()[:NICK_MAX]
+    except OSError:
+        return ''
+
+
+def save_nick(nick):
+    nick = ' '.join((nick or '').split())[:NICK_MAX]
+    try:
+        if nick:
+            os.makedirs(DIR, exist_ok=True)
+            with open(NICK, 'w', encoding='utf-8') as f:
+                f.write(nick)
+        elif os.path.exists(NICK):
+            os.remove(NICK)
+    except OSError:
+        pass
+    return nick
+
+
+def problem(r):
+    """Чого бракує зверненню, щоб його надіслати (None — усе гаразд)."""
+    n = len(re.findall(r'\w', r.get('що') or ''))
+    if n == 0:
+        return 'Напиши, будь ласка, що не так — хоч одне речення.'
+    if n < MIN_WHAT:
+        return 'Опиши трохи докладніше, що не так (хоча б кілька слів).'
+    return None
+
+
+def wait_left():
+    """Скільки секунд ще чекати до наступного звернення (0 — можна)."""
+    try:
+        last = float(open(LAST, encoding='utf-8').read().strip())
+    except (OSError, ValueError):
+        return 0
+    left = SEND_GAP - (time.time() - last)
+    return int(left) + 1 if 0 < left <= SEND_GAP else 0
+
+
+def mark_sent_now():
+    try:
+        os.makedirs(DIR, exist_ok=True)
+        with open(LAST, 'w', encoding='utf-8') as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass
+
+
 def load_draft():
     try:
         return json.load(open(DRAFT, encoding='utf-8'))
