@@ -298,7 +298,7 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
     if autofill and names_only is None:
         for _s, entries in book:
             for e in entries:
-                if e.get('tr'):
+                if e.get('tr') and e['src']:
                     memory.setdefault(e['src'], e['tr'])
 
     WRAP_COLS = [idx[c] for c in ('Оригінал (EN)', COL_TR, COL_TERMS, COL_NOTE, COL_HINT) if c in idx]
@@ -814,7 +814,7 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
                 out.append(f'рядок ширший за {where}: {max(wtr)} px при межі {round(lim)} px '
                            f'(оригінал {max(wsrc)} px) — перенеси рядок або скороти')
                 break
-    else:
+    elif src:                   # порожній оригінал (коротка назва) — порівнювати нема з чим
         for a, b in zip(src.split('\n'), tr.split('\n')):
             if len(b) > max(len(a) + 6, len(a) * 1.35):
                 out.append(f'рядок довший за оригінал: {len(a)} -> {len(b)} символів')

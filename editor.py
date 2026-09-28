@@ -156,6 +156,15 @@ class Editor(tk.Toplevel):
         # кнопки праворуч пакуються першими — у вузькому вікні стискається пошук, а не вони
         ttk.Button(top, text='Завантажити з Excel…', command=self._from_excel).pack(side='right')
         ttk.Button(top, text='Вивантажити в Excel', command=self._to_excel).pack(side='right', padx=6)
+        if self.game == 'nep':          # тексти stcm-editor/Crowdin є лише в Neptunia
+            mb = ttk.Menubutton(top, text='Crowdin')
+            m = tk.Menu(mb, tearoff=False)
+            m.add_command(label='Забрати переклад з Crowdin (.zip)…', command=lambda: self._from_crowdin(True))
+            m.add_command(label='Забрати переклад з Crowdin (тека)…', command=lambda: self._from_crowdin(False))
+            m.add_separator()
+            m.add_command(label='Вивантажити переклад для Crowdin (.zip)…', command=self._to_crowdin)
+            mb['menu'] = m
+            mb.pack(side='right')
         ttk.Button(top, text='Терміни…', command=self._terms_window).pack(side='right', padx=6)
         ttk.Label(top, text='Пошук:').pack(side='left')
         self.q_var = tk.StringVar()
@@ -489,7 +498,8 @@ class Editor(tk.Toplevel):
             rows = [r for r in rows if r['kind'] != 'key']
         f = self.flt.get()
         if f == 'Неперекладені':
-            rows = [r for r in rows if not r['e'].get('tr')]
+            # порожній оригінал (коротка назва навички) — необов'язковий, тут не заважає
+            rows = [r for r in rows if not r['e'].get('tr') and r['e']['src']]
         elif f == 'Перекладені':
             rows = [r for r in rows if r['e'].get('tr')]
         elif f == 'Відв\'язані':
@@ -1047,6 +1057,107 @@ class Editor(tk.Toplevel):
         self._refill()
         self._show_row()
         self.status.set(f'З Excel узято змін: {n}.' if n else 'У книгах Excel змін немає.')
+
+    # ============================================================ Crowdin
+    def _crowdin_ns(self):
+        """Параметри для translate_nep (як у кроках «1»/«2» головного вікна)."""
+        try:
+            gd = self.app.root_dir()
+        except RuntimeError as ex:
+            messagebox.showwarning('Crowdin', str(ex), parent=self)
+            return None
+        ns = type('a', (), {})()
+        ns.game_dir, ns.work_dir, ns.orig_dir = gd, self.pr.work, self.bk
+        return ns
+
+    def _from_crowdin(self, as_zip):
+        from tkinter import filedialog
+        ns = self._crowdin_ns()
+        if ns is None:
+            return
+        if as_zip:
+            path = filedialog.askopenfilename(parent=self, title='Архів перекладу з Crowdin',
+                                              filetypes=[('Архів Crowdin', '*.zip'), ('Усі файли', '*.*')])
+        else:
+            path = filedialog.askdirectory(parent=self, title='Тека з перекладом з Crowdin '
+                                           '(у ній SYSTEM00000, GAME00000…)')
+        if not path:
+            return
+        self.flush()
+        self.status.set('Читаю переклад з Crowdin…')
+
+        def job():
+            try:
+                import translate_nep
+                rows, rep = translate_nep.crowdin_read(ns, path)
+                st = self.pr.import_rows(rows, dry=True)
+                self.q.put(('call', lambda: self._crowdin_ask(rows, rep, st)))
+            except Exception as ex:                               # noqa: BLE001
+                self.q.put(('status', f'Не вдалося прочитати переклад з Crowdin: {ex}'))
+        threading.Thread(target=job, daemon=True).start()
+
+    def _crowdin_ask(self, rows, rep, st):
+        log = []
+        __import__('translate_nep').crowdin_report(rep, log.append)
+        self.app.say('Переклад з Crowdin:\n' + '\n'.join(log), 'dim')
+        if not rep['файлів']:
+            messagebox.showwarning('Crowdin', 'Не знайдено жодного файлу Crowdin (SYSTEM00000, '
+                                   'GAME00000, DLC…). Подробиці — у лозі головного вікна.', parent=self)
+            self.status.set('З Crowdin нічого не взято.')
+            return
+        msg = (f'Файлів: {rep["файлів"]}.\n'
+               f'Нових перекладів (у програмі порожньо): {st["нових"]}\n'
+               f'Уже такі самі: {st["уже так"]}\n'
+               f'У програмі перекладено інакше: {st["інакше"]}\n\n')
+        if st['інакше']:
+            ans = messagebox.askyesnocancel(
+                'Забрати переклад з Crowdin',
+                msg + f'Замінити ці {st["інакше"]} рядків перекладом з Crowdin?\n\n'
+                '«Так» — узяти з Crowdin; «Ні» — лише заповнити порожні.', parent=self)
+            if ans is None:
+                self.status.set('Скасовано.')
+                return
+        elif st['нових']:
+            if not messagebox.askokcancel('Забрати переклад з Crowdin', msg + 'Заповнити?', parent=self):
+                self.status.set('Скасовано.')
+                return
+            ans = False
+        else:
+            messagebox.showinfo('Crowdin', msg + 'Нового нічого — усе вже є в програмі.', parent=self)
+            self.status.set('З Crowdin нового немає.')
+            return
+        got = self.pr.import_rows(rows, replace=ans)
+        self._save()
+        self._fill_nodes()
+        self._refill()
+        self._show_row()
+        self.status.set(f'З Crowdin: нових {got["нових"]}, замінено {got["замінено"]}.')
+
+    def _to_crowdin(self):
+        from tkinter import filedialog
+        ns = self._crowdin_ns()
+        if ns is None:
+            return
+        path = filedialog.asksaveasfilename(parent=self, title='Зберегти переклад для Crowdin',
+                                            defaultextension='.zip', initialfile='Переклад для Crowdin.zip',
+                                            filetypes=[('Архів', '*.zip')])
+        if not path:
+            return
+        self.flush()
+        self.status.set('Вивантажую переклад для Crowdin…')
+        pr = self.pr
+
+        def job():
+            try:
+                import translate_nep
+                n, t = translate_nep.crowdin_write(ns, path, lambda s, i: pr.tr(f'{s}\t{i}')
+                                                   if f'{s}\t{i}' in pr.by_key else '')
+                msg = (f'Для Crowdin: файлів {n}, перекладених рядків {t} → {path}. '
+                       'У Crowdin: Translations → Upload translations.')
+            except Exception as ex:                               # noqa: BLE001
+                msg = f'Не вдалося вивантажити для Crowdin: {ex}'
+            self.q.put(('status', msg))
+        threading.Thread(target=job, daemon=True).start()
 
     # ============================================================ інше
     def _terms_window(self):

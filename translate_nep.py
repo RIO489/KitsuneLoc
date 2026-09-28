@@ -93,17 +93,28 @@ def _is_key(s):
 
 
 # ------------------------------------------------------- розбір окремих файлів
-def _gbnl_entries(g, is_gstr):
+# Поля, які перекладають і порожніми: коротка назва навички. В англійській
+# вона є лише там, де повна назва задовга; перекладач заповнює її для довгих українських.
+# (рядок у пулі: зсув є, а текст порожній — тому й у текстах Crowdin він є)
+EMPTY_OK = {'database/stskill.gbin': {8}}
+EMPTY_HINT = ('коротка назва: в англійській порожня (повна назва й так коротка); '
+              'заповнюй, лише якщо повна назва задовга')
+
+
+def _gbnl_entries(g, is_gstr, name=''):
     """-> [entry] для таблиці. id = 'запис.зсув'."""
     rows = {}
     for i, fo, text, cap in g.strings():
         rows.setdefault(i, []).append((fo, text, cap))
+    empty_ok = EMPTY_OK.get(name.replace('\\', '/').lower(), ())
     out = []
     for i, fields in rows.items():
         head = next((t for _fo, t, _c in fields if t and not _is_key(t)), '')
         key = fields[0][1] if is_gstr else ''
         for fo, text, cap in fields:
             if not text:
+                if fo in empty_ok and head:
+                    out.append({'id': f'{i}.{fo}', 'src': '', 'ctx': head, 'hint': EMPTY_HINT})
                 continue
             e = {'id': f'{i}.{fo}', 'src': text.replace(NL_GSTR, '\n') if is_gstr else text}
             if (is_gstr and fo == fields[0][0]) or _is_key(text):
@@ -196,7 +207,7 @@ def cmd_export(a, progress=None):
                 blob = pac.read(e, f)
                 try:
                     if kind == 'gbnl':
-                        items = _gbnl_entries(Gbnl(blob), e.name.lower().endswith('.gstr'))
+                        items = _gbnl_entries(Gbnl(blob), e.name.lower().endswith('.gstr'), e.name)
                         meta = {'newline': NL_GSTR} if e.name.lower().endswith('.gstr') else {}
                     elif kind == 'stcm':
                         r = _stcm_gbnl(blob)
@@ -540,37 +551,40 @@ def _txt_source(rel, docs_by_pac):
     return None
 
 
-def cmd_txt(a, progress=None):
-    """Забрати переклад з текстів stcm-editor/Crowdin (теки SYSTEM00000,
-    GAME00000, DLC). Де рядок перекладача відрізняється від англійського —
-    беремо його (це новіша версія); однаковий з оригіналом — не чіпаємо."""
-    import json
+def _crowdin_gbnl(a, pacs, src, fmt):
+    arc = src[:src.lower().index('.pac/') + 4]
+    if arc not in pacs:
+        pacs[arc] = Pac(_orig(a, arc))
+    blob = pacs[arc].read(src[len(arc) + 1:])
+    return Gbnl(blob) if fmt == 'gbnl' else _stcm_gbnl(blob)[3]
+
+
+def crowdin_read(a, path, progress=None):
+    """Переклад із текстів stcm-editor/Crowdin (тека або .zip, як їх віддає Crowdin:
+    SYSTEM00000, GAME00000, DLC). Повертає (рядки, звіт): рядки —
+    [(source, id, текст)] лише там, де текст перекладача відрізняється від
+    англійського; звіт — лічильники й списки пропущеного."""
     from neptunia import crowdin
     by_pac = {os.path.basename(arc)[:-4].lower(): arc for arc in archives(a.game_dir)}
-    files = []
-    for dp, _d, fs in os.walk(a.txt_dir):
-        for fn in fs:
-            if fn.lower().endswith('.txt'):
-                files.append(os.path.relpath(os.path.join(dp, fn), a.txt_dir))
-    st = {'файлів': 0, 'нових': 0, 'замінено': 0, 'без змін': 0, 'не знайдено': 0}
-    missing, orphans, long_ = [], [], []
-    for k, rel in enumerate(sorted(files)):
+    files = sorted(_jp_files(path))
+    rep = {'файлів': 0, 'як в англійській': 0, 'японською': 0,
+           'не знаю, куди це': [], 'немає такого рядка в грі': [], 'немає в програмі': []}
+    rows, pacs = [], {}
+    for k, (rel, raw) in enumerate(files):
         if progress:
             progress(k + 1, len(files), rel)
         src = _txt_source(rel, by_pac)
         doc = locfile.load_doc(a.work_dir, src) if src else None
         if not doc:
-            orphans.append(rel)
+            rep['не знаю, куди це'].append(rel)
             continue
-        raw = open(os.path.join(a.txt_dir, rel), 'rb').read()
-        arc = src[:src.lower().index('.pac/') + 4]
-        inner = src[len(arc) + 1:]
         if doc['format'] == 'dlctxt':
+            arc = src[:src.lower().index('.pac/') + 4]
             lines = chars.decode(raw).translate(crowdin.GREEK).split('\r\n')
-            en = chars.decode(Pac(_orig(a, arc)).read(inner)).split('\r\n')
+            en = chars.decode(Pac(_orig(a, arc)).read(src[len(arc) + 1:])).split('\r\n')
             got = {}
             if len(lines) != len(en) or [x == ';' for x in lines] != [x == ';' for x in en]:
-                orphans.append(rel + ' (будова не як в англійському файлі — пропущено)')
+                rep['не знаю, куди це'].append(rel + ' (будова не як в англійському файлі)')
                 continue
             for x in doc['entries']:
                 n = int(x['id'])
@@ -579,55 +593,143 @@ def cmd_txt(a, progress=None):
                     m = re.match(r'^(\d{3}),(.*)$', t)
                     got[x['id']] = m.group(2) if m and n == 0 else t
         else:
-            blob = Pac(_orig(a, arc)).read(inner)
-            g = Gbnl(blob) if doc['format'] == 'gbnl' else _stcm_gbnl(blob)[3]
-            idmap = crowdin.ids(g)
+            idmap = crowdin.ids(_crowdin_gbnl(a, pacs, src, doc['format']))
             got = {}
             for nid, text in crowdin.parse(raw).items():
                 sid = idmap.get(nid)
                 if sid is None:
-                    missing.append(f'{rel} #{nid}')
-                    continue
-                got[sid] = text
+                    rep['немає такого рядка в грі'].append(f'{rel} #{nid}')
+                else:
+                    got[sid] = text
+        rep['файлів'] += 1
         nl = doc.get('newline')
+        ents = {x['id']: x for x in doc['entries']}
+        for sid, t in got.items():
+            x = ents.get(sid)
+            if x is None:
+                # поле, порожнє в англійській (програма його не показує)
+                if t.strip():
+                    rep['немає в програмі'].append(f'{rel} [{sid}] {t.strip()[:40]!r}')
+                continue
+            if nl:
+                t = t.replace(nl, '\n')
+            t = t.rstrip(' \n') if not x['src'].endswith((' ', '\n')) else t
+            if (not t.strip() or t == x['src'] or x.get('kind') == 'key'
+                    or chars.encode(t, 'replace') == chars.encode(x['src'], 'replace')):
+                rep['як в англійській'] += 1
+                continue
+            if crowdin.japanese(t):
+                rep['японською'] += 1     # проєкт Crowdin DLC зроблено з японської: неперекладене
+                continue
+            rows.append((src, sid, t))
+    return rows, rep
+
+
+def crowdin_report(rep, say=print):
+    say('  ' + ', '.join(f'{k}: {len(v) if isinstance(v, list) else v}' for k, v in rep.items()))
+    for key in ('не знаю, куди це', 'немає такого рядка в грі', 'немає в програмі'):
+        for x in rep[key][:10]:
+            say(f'  ! {key}: {x}')
+        if len(rep[key]) > 10:
+            say(f'  ! …і ще {len(rep[key]) - 10}')
+
+
+def crowdin_write(a, out_dir, tr_of, progress=None):
+    """Тексти для Crowdin: ті самі файли й будова, що дає Crowdin (neptools),
+    лише SYSTEM00000 і GAME00000 (проєкт DLC у Crowdin — з японської).
+    tr_of(source, id) -> переклад або ''; без перекладу — англійський оригінал.
+    out_dir — тека або файл .zip (його Crowdin приймає в «Upload translations»).
+    Повертає (файлів, перекладених рядків)."""
+    import zipfile
+    from neptunia import crowdin
+    zf = zipfile.ZipFile(out_dir, 'w', zipfile.ZIP_DEFLATED) if out_dir.lower().endswith('.zip') else None
+    docs = []
+    for p in sorted(locfile.walk(a.work_dir)):
+        doc = locfile.load_json(p)
+        if doc and doc['format'] in ('gbnl', 'stcm') and doc['source'].startswith((SYSTEM + '/', MAIN + '/')):
+            docs.append(doc)
+    pacs, n_tr = {}, 0
+    for k, doc in enumerate(docs):
+        src = doc['source']
+        if progress:
+            progress(k + 1, len(docs), src)
+        g = _crowdin_gbnl(a, pacs, src, doc['format'])
+        # сирі байти як cp932: однобайтові 0xA1–0xDF в англійському — катакана смайликів
+        orig = {f'{i}.{fo}': raw.decode('cp932', 'replace') for i, fo, _k, raw, _c in g.items()}
+        ents = {x['id']: x for x in doc['entries']}
+        nl = doc.get('newline')
+        items = []
+        for nid, sid in crowdin.ids(g).items():
+            t = orig.get(sid, '')
+            x = ents.get(sid)
+            tr = tr_of(src, sid) if x is not None and x.get('kind') != 'key' else ''
+            if tr and tr != x['src']:
+                tr = _edges(x['src'], tr)
+                t = tr.replace('\n', nl) if nl and x.get('nl') != 'raw' else tr
+                n_tr += 1
+            items.append((nid, t))
+        arc = src[:src.lower().index('.pac/') + 4]
+        rel = os.path.basename(arc)[:-4] + '/' + src[len(arc) + 1:] + '.txt'
+        if zf:
+            zf.writestr(rel, crowdin.dump(items))
+            continue
+        dst = os.path.join(out_dir, *rel.split('/'))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, 'wb') as f:
+            f.write(crowdin.dump(items))
+    if zf:
+        zf.close()
+    return len(docs), n_tr
+
+
+def cmd_txt(a, progress=None):
+    """Забрати переклад з текстів stcm-editor/Crowdin у work (без редактора).
+    Де рядок перекладача відрізняється від англійського — беремо його (це
+    новіша версія); однаковий з оригіналом — не чіпаємо."""
+    import json
+    rows, rep = crowdin_read(a, a.txt_dir, progress)
+    by_src = {}
+    for src, sid, t in rows:
+        by_src.setdefault(src, {})[sid] = t
+    st = {'нових': 0, 'замінено': 0, 'уже так': 0}
+    long_ = []
+    for src, got in by_src.items():
+        doc = locfile.load_doc(a.work_dir, src)
         hit = False
         for x in doc['entries']:
             t = got.get(x['id'])
             if t is None:
                 continue
-            if nl:
-                t = t.replace(nl, '\n')
-            t = t.rstrip(' \n') if not x['src'].endswith((' ', '\n')) else t
-            if not t or t == x['src'] or x.get('kind') == 'key':
-                st['без змін'] += 1
-                continue
-            if re.search('[぀-ヿ㐀-鿿！-～]', t):
-                st['японською — пропущено'] = st.get('японською — пропущено', 0) + 1
-                continue          # проєкт Crowdin DLC зроблено з японської: це неперекладене
             if x.get('cap') and len(chars.encode(t, 'replace')) + 1 > x['cap']:
                 long_.append(f'{src} [{x["id"]}] {t!r}')
             if x.get('tr') == t:
-                st['без змін'] += 1
+                st['уже так'] += 1
                 continue
             st['замінено' if x.get('tr') else 'нових'] += 1
             x['tr'] = t
             x.pop('auto', None)
             hit = True
-        st['файлів'] += 1
         if hit:
             json.dump(doc, open(locfile.path_for(a.work_dir, src), 'w', encoding='utf-8'),
                       ensure_ascii=False, indent=1)
-    st['не знайдено'] = len(missing)
+    crowdin_report(rep)
     print('  ' + ', '.join(f'{k}: {v}' for k, v in st.items()))
-    for x in orphans[:20]:
-        print(f'! не знаю, куди це: {x}')
-    for x in missing[:10]:
-        print(f'! немає такого рядка в грі: {x}')
     for x in long_[:20]:
         print(f'! задовге для поля фіксованої довжини: {x}')
     if len(long_) > 20:
         print(f'! …і ще {len(long_) - 20} задовгих')
     return st
+
+
+def cmd_crowdin_out(a, progress=None):
+    """Вивантажити переклад з work у тексти для Crowdin."""
+    ents = {}
+    for p in locfile.walk(a.work_dir):
+        doc = locfile.load_json(p)
+        if doc:
+            ents[doc['source']] = {x['id']: x.get('tr', '') for x in doc['entries']}
+    n, t = crowdin_write(a, a.out_dir, lambda s, i: ents.get(s, {}).get(i, ''), progress)
+    print(f'файлів: {n}, перекладених рядків: {t} -> {a.out_dir}')
 
 
 # ------------------------------------------------------------------ японська
@@ -779,6 +881,9 @@ def main():
     tx = sp.add_parser('txt'); tx.add_argument('game_dir'); tx.add_argument('work_dir')
     tx.add_argument('txt_dir'); tx.add_argument('--orig', dest='orig_dir')
     tx.set_defaults(fn=cmd_txt)
+    co = sp.add_parser('crowdin', help='вивантажити переклад з work у тексти для Crowdin')
+    co.add_argument('game_dir'); co.add_argument('work_dir'); co.add_argument('out_dir')
+    co.add_argument('--orig', dest='orig_dir'); co.set_defaults(fn=cmd_crowdin_out)
     jp = sp.add_parser('jp', help='японський оригінал з дампів neptools (тека або .zip)')
     jp.add_argument('game_dir'); jp.add_argument('jp_path'); jp.add_argument('--orig', dest='orig_dir')
     jp.set_defaults(fn=cmd_jp)

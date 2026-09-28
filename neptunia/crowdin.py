@@ -20,15 +20,54 @@ import re
 from . import chars
 from .gbnl import STRING, U32
 
-GREEK = str.maketrans({'Α': 'І', 'Β': 'Ї', 'Γ': 'Ґ', 'Δ': 'Є',
-                       'α': 'і', 'β': 'ї', 'γ': 'ґ', 'δ': 'є'})
+_GREEK = {'Α': 'І', 'Β': 'Ї', 'Γ': 'Ґ', 'Δ': 'Є', 'α': 'і', 'β': 'ї', 'γ': 'ґ', 'δ': 'є'}
+GREEK = str.maketrans(_GREEK)
+TO_GREEK = str.maketrans({v: k for k, v in _GREEK.items()})
 _SEP = re.compile(r'^―{8,} (\S+)\s*$')
+SEP = '―' * 40 + ' '                  # як у neptools (SEP_DASH)
+_CJK = re.compile('[぀-ヿ㐀-鿿！-～]')
+_CYR = re.compile('[А-Яа-яЁёІіЇїЄєҐґ]')
+
+
+def japanese(t):
+    """Неперекладений японський рядок (проєкт Crowdin DLC зроблено з японської).
+    Рядок із кирилицею — завжди переклад: перекладач пише тире ієрогліфом «一»,
+    лишає смайлики (´・ω・｀) і японські вигуки — так губилось ~340 рядків."""
+    return bool(_CJK.search(t) and not _CYR.search(t))
+
+
+def encode(text):
+    """Рядок -> байти .txt: cp932, кирилиця двобайтова, і ї є ґ — грецькими
+    (так Crowdin віддає файли цього проєкту). Чого в cp932 немає — як у грі
+    (chars.FALLBACK), інакше «?»."""
+    out = bytearray()
+    for ch in text.translate(TO_GREEK):
+        try:
+            out += ch.encode('cp932')
+        except UnicodeEncodeError:
+            alt = chars.FALLBACK.get(ch)
+            out += alt.encode('cp932', 'replace') if alt else b'?'
+    return bytes(out)
+
+
+def dump(items):
+    """[(номер, текст)] -> байти .txt (neptools Gbnl::WriteTxt)."""
+    parts = [f'{SEP}{nid}\r\n' + t.replace('\n', '\r\n') + '\r\n' for nid, t in items]
+    parts.append(SEP + 'EOF\r\n')
+    return encode(''.join(parts))
 
 
 def parse(raw, japanese=False):
     """Байти .txt -> {номер: текст}. japanese — дамп японської версії: звичайний
     cp932 (однобайтові коди там — півширинна катакана, а не наша кирилиця)."""
-    text = raw.decode('cp932', 'replace') if japanese else chars.decode(raw).translate(GREEK)
+    text = raw.decode('cp932', 'replace')
+    if not japanese:
+        # файли Crowdin — двобайтова кирилиця, а однобайтові 0xA1–0xDF там —
+        # справжня півширинна катакана (смайлики m9(ﾟДﾟ)); нашу однобайтову
+        # схему (preconvert) впізнаємо за тим, що кирилиці немає, а катакана є
+        if not _CYR.search(text) and re.search('[｡-ﾟ]', text):
+            text = chars.decode(raw)
+        text = text.translate(GREEK)
     out, cur, buf = {}, None, []
     # neptools пише переноси як \r\n, але після редагування трапляється й
     # «голий» \n — тоді роздільник наступного рядка прилипав до тексту

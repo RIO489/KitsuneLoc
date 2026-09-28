@@ -65,6 +65,8 @@ def stats(root):
         if not doc:
             continue
         for e in doc['entries']:
+            if not e['src']:
+                continue            # порожній оригінал (коротка назва) — необов'язковий
             total += 1
             done += bool(e.get('tr'))
     return done, total

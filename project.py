@@ -74,7 +74,8 @@ class Project:
                      'n': len(self.rows)}
                 self.rows.append(r)
                 self.by_key[k] = r
-                self.links[(kind, e['src'])].append(k)
+                if e['src']:            # порожній оригінал (коротка назва) — не повтор
+                    self.links[(kind, e['src'])].append(k)
 
     def _load_store(self):
         with open(store_path(self.xl), encoding='utf-8') as f:
@@ -107,13 +108,13 @@ class Project:
     def linked(self, k):
         """Ключі, які отримають той самий переклад, що й k (разом із ним)."""
         r = self.by_key[k]
-        if r.get('окремо'):
+        if r.get('окремо') or not r['e']['src']:
             return [k]
         return [x for x in self.links[self.lk(k)] if not self.by_key[x].get('окремо')]
 
     def twins(self, k):
         """Усі рядки з тим самим оригіналом (і пов'язані, і відв'язані)."""
-        return self.links[self.lk(k)]
+        return self.links.get(self.lk(k)) or [k]
 
     def set_tr(self, k, text):
         """Записати переклад; повертає список змінених ключів."""
@@ -129,6 +130,39 @@ class Project:
                 changed.append(x)
         self._names_changed(changed)
         return changed
+
+    def import_rows(self, rows, replace=True, dry=False):
+        """Переклад ззовні (Crowdin): [(source, id, текст)]. Кожен рядок пишеться
+        лише у свій ключ (у Crowdin однакові рядки перекладають окремо); далі
+        relink — порожні однакові заповнюються, різні стають окремими.
+        replace=False — лише порожні; dry — тільки порахувати.
+        Повертає {'нових', 'інакше', 'замінено', 'уже так', 'немає в програмі'}."""
+        st = dict.fromkeys(('нових', 'інакше', 'замінено', 'уже так', 'немає в програмі'), 0)
+        changed = []
+        for source, sid, text in rows:
+            k = f'{source}\t{sid}'
+            r = self.by_key.get(k)
+            if r is None:
+                st['немає в програмі'] += 1
+                continue
+            text = text.replace('\r\n', '\n').replace('\r', '\n').strip()
+            cur = r['e'].get('tr', '')
+            if cur == text:
+                st['уже так'] += 1
+                continue
+            st['інакше' if cur else 'нових'] += 1
+            if dry or (cur and not replace):
+                continue
+            if cur:
+                st['замінено'] += 1
+            r['e']['tr'] = text
+            r['e'].pop('auto', None)
+            self.dirty.add(source)
+            changed.append(k)
+        if changed:
+            self.relink()
+            self._touched = True
+        return st
 
     def set_note(self, k, text):
         e = self.by_key[k]['e']
@@ -243,7 +277,8 @@ class Project:
         books = []
         done = total = 0
         for name, scenes in self.books().items():
-            rows = [r for rs in scenes.values() for r in rs if r['kind'] != 'key']
+            # порожній оригінал (коротка назва) — необов'язковий рядок, у відсоток не йде
+            rows = [r for rs in scenes.values() for r in rs if r['kind'] != 'key' and r['e']['src']]
             if not rows:
                 continue
             d = sum(1 for r in rows if r['e'].get('tr'))
