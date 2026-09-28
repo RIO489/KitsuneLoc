@@ -9,7 +9,7 @@
 
 Дані — project.py (Переклад\\<гра>\\переклад.json); зберігається само.
 """
-import os, queue, threading
+import os, queue, sys, threading
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 
@@ -166,6 +166,7 @@ class Editor(tk.Toplevel):
             mb['menu'] = m
             mb.pack(side='right')
         ttk.Button(top, text='Терміни…', command=self._terms_window).pack(side='right', padx=6)
+        ttk.Button(top, text='Гра на екрані…', command=self._watch_window).pack(side='right')
         ttk.Label(top, text='Пошук:').pack(side='left')
         self.q_var = tk.StringVar()
         # не розтягується з вікном: у темі sv-ttk кожне розтягування поля — дороге перемальовування
@@ -590,10 +591,14 @@ class Editor(tk.Toplevel):
         self.after(1, lambda: (self.tr_text.focus_set(), self.tr_text.mark_set('insert', 'end-1c')))
         return 'break'
 
-    def goto(self, key):
-        """Відкрити рядок (з попередження в головному вікні)."""
+    def goto(self, key, quiet=False):
+        """Відкрити рядок (з попередження в головному вікні). quiet — зі «Стежити
+        за грою»: без фокусу й підйому вікна (гра лишається попереду)."""
         if key not in self.pr.by_key:
             return False
+        if quiet and key == self.cur:
+            return True
+        self.flush()
         self._quiet_select('all')
         self.flt.set(FILTERS[0])
         self.q_var.set('')
@@ -601,8 +606,12 @@ class Editor(tk.Toplevel):
             self.keys.set(True)
         self.cur = key
         self._refill()
-        self.tr_text.focus_set()
-        self.lift()
+        # вибір у списку не покаже рядок (_row_selected: «той самий cur»), тож показуємо самі —
+        # інакше в полі лишався текст попереднього рядка, і наступний _commit писав його сюди
+        self._show_row()
+        if not quiet:
+            self.tr_text.focus_set()
+            self.lift()
         return True
 
     # ============================================================ панель рядка
@@ -642,6 +651,7 @@ class Editor(tk.Toplevel):
                 self._set_text(self.tr_text, e.get('tr', ''))
                 self.tr_text.edit_reset()
                 self.tr_text.edit_modified(False)
+                self._text_for = k          # для якого рядка зараз текст у полі (див. _commit)
             self.note.set(e.get('note', ''))
             self._link_state()
             self._checks()
@@ -742,6 +752,10 @@ class Editor(tk.Toplevel):
             self.after_cancel(self.pending.pop('commit'))
         k = self.cur
         if not k or self._loading:
+            return
+        if getattr(self, '_text_for', None) != k:
+            # у полі — текст іншого рядка (рядок змінили, а поле ще не оновилось):
+            # записати його сюди — зіпсувати переклад (так «Битва» розійшлась по сценах)
             return
         text = self.tr_text.get('1.0', 'end-1c')
         if text.strip() == self.pr.tr(k):
@@ -1174,7 +1188,23 @@ class Editor(tk.Toplevel):
         self.ctx = None
         threading.Thread(target=self._load_bg, daemon=True).start()
 
+    def _watch_window(self):
+        """«Гра на екрані»: які рядки зараз у грі (screenwatch_window.py)."""
+        w = getattr(self, 'watch_win', None)
+        if w is not None and w.winfo_exists():
+            w.lift()
+            return
+        import importlib
+        for name in ('screenwatch', 'screenwatch_window'):
+            if name in sys.modules:
+                importlib.reload(sys.modules[name])
+        import screenwatch_window
+        self.watch_win = screenwatch_window.WatchWindow(self.app, self)
+
     def _close(self):
+        w = getattr(self, 'watch_win', None)
+        if w is not None and w.winfo_exists():
+            w._close()
         self.flush()
         if getattr(self.app, 'editor_win', None) is self:
             self.app.editor_win = None

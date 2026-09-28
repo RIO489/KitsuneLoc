@@ -537,6 +537,39 @@ def cmd_seed(a, progress=None):
     print(f'перенесено перекладених рядків: {took}')
 
 
+def game_texts(game_dir, work_dir):
+    """Що зараз лежить у файлах гри (для «Гра на екрані»): {source: {id: текст}} лише
+    для змінених (нами — нестиснених) файлів; стиснені — оригінали, там текст = src.
+    Так видно старий переклад, який ще не замінено «2»."""
+    out = {}
+    for arc in archives(game_dir):
+        p = os.path.join(game_dir, *arc.split('/'))
+        try:
+            pac = Pac(p)
+        except (OSError, ValueError):
+            continue
+        todo = [e for e in pac.entries if e.packed != 1 and _kind(e.name) in ('gbnl', 'stcm')]
+        if not todo:
+            continue
+        with open(p, 'rb') as f:
+            for e in todo:
+                src = _source(arc, e.name)
+                doc = locfile.load_doc(work_dir, src)
+                if not doc or doc['format'] not in ('gbnl', 'stcm'):
+                    continue
+                try:
+                    blob = pac.read(e, f)
+                    g = Gbnl(blob) if doc['format'] == 'gbnl' else (_stcm_gbnl(blob) or [None] * 4)[3]
+                except Exception:                               # noqa: BLE001
+                    continue
+                if g is None:
+                    continue
+                nl = doc.get('newline')
+                out[src] = {f'{i}.{fo}': (t.replace(nl, '\n') if nl else t)
+                            for i, fo, t, _c in g.strings()}
+    return out
+
+
 def _txt_source(rel, docs_by_pac):
     """Шлях .txt у теці перекладача -> source документа work.
     GAME00000/event/…/main.cl3.txt -> data/GAME00000.pac/event/…/main.cl3;
