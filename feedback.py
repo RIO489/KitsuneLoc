@@ -20,6 +20,7 @@ DIR = os.path.join(HERE, 'звернення')
 QUEUE = os.path.join(DIR, 'черга')
 SENT = os.path.join(DIR, 'надіслано')
 DRAFT = os.path.join(DIR, 'чернетка.json')
+HIDDEN = os.path.join(DIR, 'приховані знімки.json')
 LOGFILE = os.path.join(HERE, 'лог.txt')
 
 # тип звернення -> (підпис, колір значка теми; Telegram дозволяє лише ці шість)
@@ -209,16 +210,60 @@ def shot_dirs(libs, installdir='', game=''):
     return [d for d in dict.fromkeys(dirs) if os.path.isdir(d)]
 
 
+def hidden_shots():
+    """Знімки, які перекладач прибрав зі списку (правий клік) — більше не показуємо."""
+    try:
+        return set(json.load(open(HIDDEN, encoding='utf-8')))
+    except (OSError, ValueError):
+        return set()
+
+
+def hide_shots(paths, on=True):
+    """Прибрати знімки зі списку (on=False і paths=None — повернути всі)."""
+    h = hidden_shots()
+    if on:
+        h |= {os.path.normcase(os.path.abspath(p)) for p in paths}
+    elif paths is None:
+        h = set()
+    else:
+        h -= {os.path.normcase(os.path.abspath(p)) for p in paths}
+    os.makedirs(DIR, exist_ok=True)
+    with open(HIDDEN, 'w', encoding='utf-8') as f:
+        json.dump(sorted(h), f, ensure_ascii=False, indent=1)
+
+
+def to_recycle_bin(paths):
+    """Файли — у Кошик Windows (можна відновити). Повертає, що не вдалося."""
+    paths = [os.path.abspath(p) for p in paths if os.path.exists(p)]
+    if not paths or os.name != 'nt':
+        return paths
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [('hwnd', wintypes.HWND), ('wFunc', wintypes.UINT),
+                    ('pFrom', wintypes.LPCWSTR), ('pTo', wintypes.LPCWSTR),
+                    ('fFlags', ctypes.c_uint16), ('fAnyOperationsAborted', wintypes.BOOL),
+                    ('hNameMappings', ctypes.c_void_p), ('lpszProgressTitle', wintypes.LPCWSTR)]
+    FO_DELETE, FOF_SILENT, FOF_NOCONFIRMATION, FOF_ALLOWUNDO, FOF_NOERRORUI = 3, 4, 0x10, 0x40, 0x400
+    op = SHFILEOPSTRUCTW(wFunc=FO_DELETE, pFrom='\0'.join(paths) + '\0\0',
+                         fFlags=FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI)
+    ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+    return [p for p in paths if os.path.exists(p)]
+
+
 def recent_shots(dirs, n=12, days=30):
-    """Найсвіжіші знімки з тек (новіші за `days` днів), новіші — першими."""
+    """Найсвіжіші знімки з тек (новіші за `days` днів), новіші — першими;
+    прибрані перекладачем зі списку — пропускаються."""
     old = time.time() - days * 86400
+    hidden = hidden_shots()
     found = []
     for d in dirs:
         try:
             for e in os.scandir(d):
                 if e.is_file() and e.name.lower().endswith(('.jpg', '.jpeg', '.png')):
                     t = e.stat().st_mtime
-                    if t >= old:
+                    if t >= old and os.path.normcase(os.path.abspath(e.path)) not in hidden:
                         found.append((t, e.path))
         except OSError:
             continue

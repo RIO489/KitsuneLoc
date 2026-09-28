@@ -111,6 +111,7 @@ class FeedbackWindow(tk.Toplevel):
         self.strip = tk.Frame(self.canvas, bd=0, bg=self.app.colors()['bg'])
         self.canvas.create_window(0, 0, window=self.strip, anchor='nw')
         self.strip.bind('<Configure>', lambda e: self.canvas.configure(scrollregion=self.canvas.bbox('all')))
+        self.canvas.bind('<Button-3>', lambda e: self._shot_menu(e))
         self.canvas.bind('<MouseWheel>', lambda e: self.canvas.xview_scroll(-1 if e.delta > 0 else 1, 'units'))
 
         # --- низ ------------------------------------------------------------
@@ -187,6 +188,7 @@ class FeedbackWindow(tk.Toplevel):
         item = (src, var, box, ph)
         for w in (box, lbl, cap):
             w.bind('<Button-1>', lambda e, it=item: self._toggle(it))
+            w.bind('<Button-3>', lambda e, it=item: self._shot_menu(e, it))
             w.bind('<MouseWheel>', lambda e: self.canvas.xview_scroll(-1 if e.delta > 0 else 1, 'units'))
         if first and self.shots:
             box.pack(side='left', padx=4, pady=4, before=self.shots[0][2])
@@ -209,6 +211,77 @@ class FeedbackWindow(tk.Toplevel):
     def _count(self):
         n = sum(1 for s in self.shots if s[1].get())
         self.shot_info.set(f'вибрано: {n}' if n else 'нічого не вибрано')
+
+    def _shot_menu(self, ev, item=None):
+        """Правий клік по знімку: прибрати зі списку / у Кошик. Якщо клацнуто по
+        вибраному, а вибрано кілька, — дія над усіма вибраними."""
+        chosen = [s for s in self.shots if s[1].get()]
+        items = chosen if item is not None and item in chosen and len(chosen) > 1 else \
+            ([item] if item is not None else [])
+        files = [s for s in items if isinstance(s[0], str)]
+        n = len(items)
+        m = tk.Menu(self, tearoff=0)
+        if items:
+            what = 'знімок' if n == 1 else f'вибрані знімки ({n})'
+            m.add_command(label=f'Прибрати {what} зі списку', command=lambda: self._hide(items))
+            if files:
+                m.add_command(label=f'Видалити з комп\'ютера (у Кошик)… ({len(files)})',
+                              command=lambda: self._recycle(files))
+            m.add_separator()
+        rest = [s for s in self.shots if not s[1].get()]
+        if rest:
+            m.add_command(label=f'Прибрати всі невибрані ({len(rest)})', command=lambda: self._hide(rest))
+        hidden = len(feedback.hidden_shots())
+        if hidden:
+            m.add_command(label=f'Повернути прибрані зі списку ({hidden})', command=self._unhide)
+        if m.index('end') is None:
+            return
+        try:
+            m.tk_popup(ev.x_root, ev.y_root)
+        finally:
+            m.grab_release()
+
+    def _drop(self, items):
+        for s in items:
+            s[2].destroy()
+        self.shots = [s for s in self.shots if s not in items]
+        if any(s[0] is self.ctx.get('image') for s in items):
+            self.ctx['image'] = None            # прев'ю напису не повертати при «Оновити»
+        self._count()
+
+    def _hide(self, items):
+        files = [s[0] for s in items if isinstance(s[0], str)]
+        if files:
+            try:
+                feedback.hide_shots(files)
+            except OSError as ex:
+                self.status.set(f'Не вдалося запам\'ятати: {ex}')
+        self._drop(items)
+        self._fill_shots()                      # на місце прибраних — старші знімки
+        self.status.set(f'Прибрано зі списку: {len(items)} (файли на диску не чіпали).')
+
+    def _unhide(self):
+        try:
+            feedback.hide_shots(None, on=False)
+        except OSError:
+            pass
+        self._fill_shots()
+        self.status.set('Прибрані знімки знову в списку.')
+
+    def _recycle(self, items):
+        names = '\n'.join(os.path.basename(s[0]) for s in items[:10])
+        more = f'\n…і ще {len(items) - 10}' if len(items) > 10 else ''
+        if not messagebox.askyesno('Видалити знімки',
+                                   f'Перемістити в Кошик ({len(items)}):\n\n{names}{more}\n\n'
+                                   'Їх можна буде відновити з Кошика.', parent=self):
+            return
+        left = feedback.to_recycle_bin([s[0] for s in items])
+        left = {os.path.normcase(p) for p in left}
+        gone = [s for s in items if os.path.normcase(os.path.abspath(s[0])) not in left]
+        self._drop(gone)
+        self._fill_shots()
+        self.status.set(f'У Кошику: {len(gone)}.' +
+                        (f' Не вдалося: {len(left)} (файл зайнятий?).' if left else ''))
 
     def _paste(self):
         ims = feedback.clipboard_images()
