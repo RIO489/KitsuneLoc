@@ -11,7 +11,7 @@
 """
 import os, queue, sys, threading
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import ttk, messagebox, simpledialog, font as tkfont
 
 from PIL import Image, ImageTk
 
@@ -226,9 +226,21 @@ class Editor(tk.Toplevel):
         body.add(mid, weight=1)          # ширина вікна змінюється — тягнеться лише список
 
         # --- панель рядка -------------------------------------------------
-        right = self.right = ttk.Frame(body, padding=(10, 0, 0, 0))
-        body.add(right, weight=0)
+        # панель прокручується: довгий оригінал + японська + переклад бувають вищі за екран
+        # (у перекладача низ панелі з полем перекладу ховався за краєм вікна)
+        outer = ttk.Frame(body)
+        body.add(outer, weight=0)
+        self.rcanvas = tk.Canvas(outer, bg=c['bg'], highlightthickness=0, borderwidth=0)
+        self.rscroll = ttk.Scrollbar(outer, orient='vertical', command=self.rcanvas.yview)
+        self.rcanvas.configure(yscrollcommand=self.rscroll.set)
+        self.rscroll.pack(side='right', fill='y')
+        self.rcanvas.pack(side='left', fill='both', expand=True)
+        right = self.right = ttk.Frame(self.rcanvas, padding=(10, 0, 6, 0))
+        self._rwin = self.rcanvas.create_window(0, 0, window=right, anchor='nw')
+        self.rcanvas.bind('<Configure>', lambda e: self.rcanvas.itemconfigure(self._rwin, width=e.width))
         right.bind('<Configure>', self._right_resized)
+        self.bind_all('<MouseWheel>', self._wheel, add='+')
+        self.heights = dict(getattr(self.app, 'settings', {}).get('editor_heights') or {})
         self._right_w = 0
         self.head = tk.StringVar()
         ttk.Label(right, textvariable=self.head, font=('Segoe UI', 11, 'bold')).pack(anchor='w')
@@ -239,8 +251,10 @@ class Editor(tk.Toplevel):
 
         ttk.Label(right, text='Оригінал').pack(anchor='w', pady=(6, 0))
         self.src_text = self._text(right, 4, readonly=True)
+        self.src_grip = self._grip(right, 'src', self.src_text)
         self.ja_lbl = ttk.Label(right, text='Японська')
         self.ja_text = self._text(right, 2, readonly=True, pack=False)
+        self.ja_grip = self._grip(right, 'ja', self.ja_text, pack=False)
 
         tl = ttk.Frame(right)
         tl.pack(fill='x', pady=(6, 0))
@@ -255,6 +269,7 @@ class Editor(tk.Toplevel):
         self.tr_text.bind('<Alt-Return>', self._newline)
         self.tr_text.bind('<Control-Down>', lambda e: self._step(1))
         self.tr_text.bind('<Control-Up>', lambda e: self._step(-1))
+        self._grip(right, 'tr', self.tr_text)
         self.bind('<Control-f>', lambda e: (self.search.focus_set(), 'break')[1])
 
         lk = ttk.Frame(right)
@@ -289,6 +304,10 @@ class Editor(tk.Toplevel):
         self.pic.pack(anchor='w')
         self.pic_photos = []
         self.pic_extra = []                      # (підпис, картинка) для інших екранів діалогу
+        # межі вікон діалогу, які перекладач поправив сам (у грі обрізає раніше/пізніше)
+        self.lim_box = ttk.Frame(right)
+        self.lim_box.pack(anchor='w', fill='x', pady=(4, 0))
+        self.lim_vars = {}                       # id екрана -> IntVar
 
         bot = ttk.Frame(self.content, padding=(10, 2, 10, 8))
         bot.pack(fill='x')
@@ -340,6 +359,7 @@ class Editor(tk.Toplevel):
     def _right_resized(self, ev):
         """Панель рядка змінила ширину (вікно чи роздільник): переноси підписів
         і прев'ю — під нову ширину (прев'ю — коли перестали тягнути)."""
+        self.rcanvas.configure(scrollregion=(0, 0, ev.width, ev.height))
         w = ev.width
         if abs(w - self._right_w) < 4:
             return
@@ -349,6 +369,57 @@ class Editor(tk.Toplevel):
         self.where_lbl.configure(wraplength=wrap)
         self._later('preview', 200, self._preview)
         self._later('fit_text', 150, self._fit_all)      # інша ширина — інші переноси
+
+    def _wheel(self, ev):
+        """Коліщатко над панеллю рядка прокручує панель (поле з власною прокруткою — само)."""
+        w = ev.widget
+        try:
+            if not str(w).startswith(str(self.rcanvas)):
+                return
+            if isinstance(w, tk.Text) and w.yview() != (0.0, 1.0):
+                return                                   # прокручується саме поле
+            if self.rcanvas.yview() == (0.0, 1.0):
+                return
+        except (tk.TclError, AttributeError):
+            return
+        self.rcanvas.yview_scroll(-1 if ev.delta > 0 else 1, 'units')
+
+    def _grip(self, parent, name, t, pack=True):
+        """Ручка під полем: тягни — висота поля (рядків), подвійний клік — знову «за текстом».
+        Вибрана висота запам'ятовується (settings.json, 'editor_heights')."""
+        g = tk.Frame(parent, height=9, cursor='sb_v_double_arrow', bg=self.c['bg'])
+        bar = tk.Frame(g, height=3, width=70, cursor='sb_v_double_arrow', bg=self.c['dim'])
+        bar.place(relx=0.5, rely=0.5, anchor='center')
+        state = {}
+
+        def press(ev):
+            state['y'], state['h'] = ev.y_root, int(t.cget('height'))
+            state['lh'] = max(8, tkfont.Font(font=t.cget('font')).metrics('linespace'))
+
+        def drag(ev):
+            if 'y' not in state:
+                return
+            h = max(1, min(60, state['h'] + round((ev.y_root - state['y']) / state['lh'])))
+            if int(t.cget('height')) != h:
+                t.configure(height=h)
+            self.heights[name] = h
+
+        def release(_ev):
+            if state.pop('y', None) is not None:
+                self._save_setting('editor_heights', dict(self.heights))
+
+        def auto(_ev):
+            self.heights.pop(name, None)
+            self._save_setting('editor_heights', dict(self.heights))
+            self._fit_all()
+        for w in (g, bar):
+            w.bind('<ButtonPress-1>', press)
+            w.bind('<B1-Motion>', drag)
+            w.bind('<ButtonRelease-1>', release)
+            w.bind('<Double-1>', auto)
+        if pack:
+            g.pack(fill='x', pady=(1, 0))
+        return g
 
     def _text(self, parent, h, readonly=False, pack=True):
         c = self.c
@@ -366,7 +437,12 @@ class Editor(tk.Toplevel):
     # (найменше, найбільше) — довше прокручується, щоб не витіснити решту панелі
     FIT = {'src': (2, 12), 'ja': (1, 14), 'tr': (3, 12)}
 
-    def _fit_text(self, t, lo, hi):
+    def _fit_text(self, t, lo, hi, name=None):
+        if name and name in self.heights:               # висоту задано ручкою під полем
+            h = self.heights[name]
+            if int(t.cget('height')) != h:
+                t.configure(height=h)
+            return
         try:
             n = t.count('1.0', 'end', 'displaylines')
         except tk.TclError:
@@ -381,10 +457,10 @@ class Editor(tk.Toplevel):
         висота кожного поля — за його текстом."""
         if not self.winfo_exists():
             return
-        self._fit_text(self.src_text, *self.FIT['src'])
+        self._fit_text(self.src_text, *self.FIT['src'], 'src')
         if getattr(self, '_ja_shown', False):
-            self._fit_text(self.ja_text, *self.FIT['ja'])
-        self._fit_text(self.tr_text, *self.FIT['tr'])
+            self._fit_text(self.ja_text, *self.FIT['ja'], 'ja')
+        self._fit_text(self.tr_text, *self.FIT['tr'], 'tr')
 
     @staticmethod
     def _set_text(t, s):
@@ -401,7 +477,8 @@ class Editor(tk.Toplevel):
         """Межі ширини й шрифт гри для прев'ю — кілька секунд, не блокуємо вікно."""
         try:
             docs = [d for _p, d in self.pr.docs.values()]
-            ctx = sheets.limits(docs, self.bk, os.path.dirname(os.path.abspath(self.pr.work)))
+            ctx = sheets.limits(docs, self.bk, os.path.dirname(os.path.abspath(self.pr.work)),
+                                sheets.load_widths(self.pr.xl))
             self.q.put(('ctx', ctx))
         except Exception as ex:                                   # noqa: BLE001
             self.q.put(('status', f'Межі ширини не пораховано: {ex}'))
@@ -422,6 +499,7 @@ class Editor(tk.Toplevel):
                 what, val = self.q.get_nowait()
                 if what == 'ctx':
                     self.ctx = val
+                    self._build_limits()
                     self._show_row(keep_text=True)
                 elif what == 'font':
                     self.fonts = val
@@ -687,12 +765,14 @@ class Editor(tk.Toplevel):
             if e.get('ja'):
                 self._set_text(self.ja_text, e['ja'])
                 if not getattr(self, '_ja_shown', False):
-                    self.ja_lbl.pack(anchor='w', pady=(4, 0), after=self.src_text)
+                    self.ja_lbl.pack(anchor='w', pady=(4, 0), after=self.src_grip)
                     self.ja_text.pack(fill='x', after=self.ja_lbl)
+                    self.ja_grip.pack(fill='x', pady=(1, 0), after=self.ja_text)
                     self._ja_shown = True
             elif getattr(self, '_ja_shown', False):
                 self.ja_lbl.pack_forget()
                 self.ja_text.pack_forget()
+                self.ja_grip.pack_forget()
                 self._ja_shown = False
             if not keep_text:
                 self._set_text(self.tr_text, e.get('tr', ''))
@@ -793,7 +873,7 @@ class Editor(tk.Toplevel):
             return
         self._later('commit', COMMIT_DELAY, self._commit)
         self._later('preview', 300, self._preview)
-        self._fit_text(self.tr_text, *self.FIT['tr'])     # поле росте разом із перекладом
+        self._fit_text(self.tr_text, *self.FIT['tr'], 'tr')   # поле росте разом із перекладом
 
     def _enter(self, _e):
         return self._step(1)
@@ -850,13 +930,15 @@ class Editor(tk.Toplevel):
 
     # ============================================================ прев'ю
     def _pics(self, items):
-        """Показати [(підпис | None, Image | None, текст)] — один чи кілька екранів."""
+        """Показати [(підпис | None, Image | None, текст[, екран, масштаб])] — один чи кілька
+        екранів. Клік по картинці екрана діалогу — межа вікна там, де клікнули."""
         self.pic_photos = []
         for w in self.pic_extra:
             w.destroy()
         self.pic_extra = []
+        self.pic.unbind('<Button-1>')
         first = True
-        for cap, im, text in items:
+        for cap, im, text, *scr in items:
             photo = ImageTk.PhotoImage(im) if im is not None else None
             if photo:
                 self.pic_photos.append(photo)
@@ -865,14 +947,79 @@ class Editor(tk.Toplevel):
                     lab = ttk.Label(self.pic_box, text=cap, style='Hint.TLabel')
                     lab.pack(anchor='w', before=self.pic)
                     self.pic_extra.append(lab)
-                self.pic.configure(image=photo or '', text=text)
+                self.pic.configure(image=photo or '', text=text, cursor='')
+                self._lim_click(self.pic, *scr)
                 first = False
                 continue
             lab = ttk.Label(self.pic_box, text=cap or '', style='Hint.TLabel')
             lab.pack(anchor='w', pady=(6, 0))
             img = tk.Label(self.pic_box, bg=self.c['bg'], bd=0, image=photo or '', text=text)
             img.pack(anchor='w')
+            self._lim_click(img, *scr)
             self.pic_extra += [lab, img]
+
+    def _lim_click(self, lab, sc=None, k=None):
+        if not sc or not k or sc['id'] not in self.lim_vars:
+            return
+        import preview
+        lab.configure(cursor='crosshair')
+        lab.bind('<Button-1>', lambda ev: self.lim_vars[sc['id']].set(max(50, round(ev.x / k - preview.PAD))))
+
+    # ============================================================ межа вікна діалогу
+    def _build_limits(self):
+        """Поля «межа вікна» для кожного екрана діалогу (sheets.limits → screens)."""
+        for w in self.lim_box.winfo_children():
+            w.destroy()
+        self.lim_vars = {}
+        screens = (self.ctx or {}).get('screens') or []
+        if not screens:
+            return
+        ttk.Label(self.lim_box, text='Межа вікна — де гра вже не показує текст (px шрифту гри). '
+                  'Клік по прев\'ю ставить межу там, де клікнули.',
+                  style='Hint.TLabel', wraplength=PREVIEW_W, justify='left').pack(anchor='w')
+        for sc in screens:
+            row = ttk.Frame(self.lim_box)
+            row.pack(anchor='w', fill='x', pady=(2, 0))
+            ttk.Label(row, text=sc['назва'].capitalize() + ':').pack(side='left')
+            v = tk.IntVar(value=int(round(sc['lim'])))
+            self.lim_vars[sc['id']] = v
+            ttk.Spinbox(row, from_=50, to=4000, increment=1, textvariable=v, width=6).pack(side='left', padx=6)
+            info = tk.StringVar()
+            ttk.Label(row, textvariable=info, style='Hint.TLabel').pack(side='left')
+            b = ttk.Button(row, text='Як виміряно', command=lambda v=v, sc=sc: v.set(int(round(sc['lim0']))))
+            b.pack(side='left', padx=6)
+
+            def show(sc=sc, info=info, b=b):
+                own = round(sc['lim']) != round(sc['lim0'])
+                info.set(f'(виміряно: {round(sc["lim0"])})' if own else '(виміряно в грі)')
+                b.configure(state='normal' if own else 'disabled')
+            show()
+            v.trace_add('write', lambda *_, sc=sc, v=v, show=show: self._lim_changed(sc, v, show))
+
+    def _lim_changed(self, sc, v, show):
+        try:
+            n = int(v.get())
+        except (tk.TclError, ValueError):
+            return                                   # ще набирають число
+        if n < 50 or n == round(sc['lim']):
+            return
+        sc['lim'] = n
+        show()
+        self._later('preview', 150, self._preview)
+        if self.cur:
+            self._checks()
+        self._later('widths', 600, self._save_widths)
+
+    def _save_widths(self):
+        own = {sc['id']: int(round(sc['lim'])) for sc in (self.ctx or {}).get('screens') or []
+               if round(sc['lim']) != round(sc['lim0'])}
+        try:
+            sheets.save_widths(self.pr.xl, own)
+        except OSError as ex:
+            self.status.set(f'Межу не збережено: {ex}')
+            return
+        self.status.set('Межу вікна збережено — перевірка перекладу тепер рахує з нею.' if own
+                        else 'Межа вікна — як виміряно в грі.')
 
     def _preview(self):
         k = self.cur
@@ -896,6 +1043,10 @@ class Editor(tk.Toplevel):
         dialog = sheets._width_group(doc, e) == ('діалог',)
         name = self.pr.speaker(r) if dialog else None
         screens = self.ctx.get('screens') if dialog else None
+        if screens:
+            self.lim_box.pack(anchor='w', fill='x', pady=(4, 0), after=self.pic_box)
+        else:
+            self.lim_box.pack_forget()
         width = max(200, min(PREVIEW_W, self.pic_box.winfo_width() - 8))
         items = []
         for sc in screens or [None]:
@@ -909,7 +1060,8 @@ class Editor(tk.Toplevel):
                 items.append((None, None, f'прев\'ю не вдалося: {ex}'))
                 continue
             cap = sc['назва'].capitalize() if sc and len(screens) > 1 else None
-            items.append((cap, preview.fit(im, width), ''))
+            small = preview.fit(im, width)
+            items.append((cap, small, '', sc, small.width / im.width))
         self._pics(items or [(None, None, '')])
 
     # ============================================================ групи
@@ -1261,9 +1413,12 @@ class Editor(tk.Toplevel):
         """Редактор поверх усіх вікон; вибір запам'ятовується (settings.json)."""
         on = self.ontop.get()
         self.attributes('-topmost', on)
+        self._save_setting('editor_ontop', on)
+
+    def _save_setting(self, key, val):
         settings = getattr(self.app, 'settings', None)
         if settings is not None:
-            settings['editor_ontop'] = on
+            settings[key] = val
             try:
                 import importlib
                 save = getattr(importlib.import_module('__main__'), 'save_settings', None)

@@ -695,9 +695,10 @@ def _backup_of(work_dir):
     return os.path.join(os.path.dirname(os.path.dirname(w)), 'backup', os.path.basename(w))
 
 
-def limits(docs, backup_dir, cache_dir):
+def limits(docs, backup_dir, cache_dir, widths=None):
     """Межі з оригіналів для перевірки ширини: {'wtab', 'game', 'gmax', 'gcount', 'glines'}.
-    По групах (див. _width_group): найширший рядок і найбільше рядків в оригіналах."""
+    По групах (див. _width_group): найширший рядок і найбільше рядків в оригіналах.
+    widths — межі вікон діалогу, задані перекладачем ({id екрана: px}, load_widths)."""
     import metrics
     docs = [d for d in docs if d.get('format') != 'atlas']   # написи малюємо самі: ліміти тут не діють
     game = next((d.get('game') for d in docs), None)
@@ -737,7 +738,8 @@ def limits(docs, backup_dir, cache_dir):
         # (там бувають викиди, що й у грі не влазять: «(´・ω・｀) Aaaaaah...» у
         # Neptunia), а 99,9% рядків оригіналу
         w = sorted(sc.pop('w')) or [0]
-        sc['lim'] = DIALOG_WIDTH.get((game, sc['id'])) or w[min(len(w) - 1, int(len(w) * DIALOG_PCT))]
+        sc['lim0'] = DIALOG_WIDTH.get((game, sc['id'])) or w[min(len(w) - 1, int(len(w) * DIALOG_PCT))]
+        sc['lim'] = (widths or {}).get(sc['id']) or sc['lim0']
     return {'wtab': wtab, 'game': game, 'gmax': gmax, 'gcount': gcount, 'glines': glines,
             'screens': screens}
 
@@ -752,6 +754,31 @@ DIALOG_WIDTH = {('nep', 'adv'): 790,        # головне вікно, advfont
                 # ≈1290, беремо 1280. Історія (Backlog) обрізає: видно 1032, зникло з 1044
                 ('msk', 'msg'): 1280,
                 ('msk', 'log'): 1036}
+
+
+WIDTHS_FILE = 'межі.json'   # Переклад\<гра>\межі.json: {id екрана: px} — перекладач сам поправив межу
+
+
+def load_widths(xl):
+    """Межі вікон діалогу, задані перекладачем (у грі текст обрізається раніше чи пізніше,
+    ніж виміряли ми): {id екрана ('adv', 'msg', 'log'): px}."""
+    try:
+        with open(os.path.join(xl, WIDTHS_FILE), encoding='utf-8') as f:
+            d = json.load(f)
+        return {k: int(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0}
+    except (OSError, ValueError, AttributeError):
+        return {}
+
+
+def save_widths(xl, widths):
+    """Записати межі перекладача; порожньо — файл прибирається (діє виміряне)."""
+    path = os.path.join(xl, WIDTHS_FILE)
+    if not widths:
+        if os.path.exists(path):
+            os.remove(path)
+        return
+    with open(path, 'w', encoding='utf-8') as f:
+        json.dump(widths, f, ensure_ascii=False, indent=1)
 
 
 def width_limit(doc, e, ctx, screen=None):
@@ -863,7 +890,7 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
     return out
 
 
-def validate(work_dir, backup_dir=None, terms=None):
+def validate(work_dir, backup_dir=None, terms=None, widths=None):
     """[(source, id, попередження)]; terms — глосарій (glossary.load), щоб ловити
     рядки, де термін в оригіналі є, а його перекладу немає."""
     warn = []
@@ -873,7 +900,7 @@ def validate(work_dir, backup_dir=None, terms=None):
     tagdict = tags.build_dict(files) if any(s.startswith('parameter/') for s, _ in files) else None
     docs = [d for d in (locfile.load_json(p) for p in sorted(locfile.walk(work_dir))) if d]
     docs = [d for d in docs if d.get('format') != 'atlas']
-    ctx = limits(docs, backup_dir or _backup_of(work_dir), os.path.dirname(os.path.abspath(work_dir)))
+    ctx = limits(docs, backup_dir or _backup_of(work_dir), os.path.dirname(os.path.abspath(work_dir)), widths)
     for doc in docs:
         for e in doc['entries']:
             if not e.get('tr'):

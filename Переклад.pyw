@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.1'
+VERSION = '2.2'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -989,7 +989,7 @@ class App(tk.Tk):
         self._require_originals()
         if not self._read_translation():
             raise RuntimeError('Перекладу ще немає — нема чого заливати.')
-        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl)), xl)
+        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl)), xl)
         if warn:
             self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок, '
                      'правий клік — затвердити)', 'warn')
@@ -1188,7 +1188,7 @@ class App(tk.Tk):
         self._remember_pc(done, total)
         self.say(f'\nПерекладено {done} з {total} рядків '
                  f'({100 * done / total if total else 0:.1f}%).', 'head')
-        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl)), xl)
+        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl)), xl)
         if not warn:
             self.say('Попереджень немає — усе чисто.', 'ok')
         else:
