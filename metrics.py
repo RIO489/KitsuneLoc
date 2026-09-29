@@ -103,7 +103,8 @@ def _code_sig():
     """Кеш застаріває, коли міняється fontfix (інші відступи — інші ширини)."""
     here = os.path.dirname(os.path.abspath(__file__))
     out = []
-    for p in ('maryskelter/fontfix.py', 'neptunia/fontfix.py', 'neptunia/chars.py'):
+    for p in ('maryskelter/fontfix.py', 'neptunia/fontfix.py', 'neptunia/chars.py',
+              'compileheart/fontfix.py', 'compileheart/ffu.py', 'compileheart/scheme.py'):
         try:
             out.append(str(int(os.path.getmtime(os.path.join(here, p)))))
         except OSError:

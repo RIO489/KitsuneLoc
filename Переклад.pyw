@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.2.2'
+VERSION = '2.3'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -703,6 +703,7 @@ class App(tk.Tk):
         поки вікно відкрите, воно одразу працює з новою версією."""
         import importlib
         for name in ('common', 'crystar.unitystr', 'crystar.tags', 'crystar',
+                     'compileheart.ffu', 'compileheart.fontfix', 'compileheart.scheme', 'compileheart',
                      'maryskelter.bra', 'maryskelter.gbnl', 'maryskelter.cl3',
                      'maryskelter.textdata', 'maryskelter.chars',
                      'maryskelter.enc', 'maryskelter.table', 'maryskelter.lzo1x',

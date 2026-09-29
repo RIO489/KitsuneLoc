@@ -111,6 +111,40 @@ def check_nep():
     print('OK  написи на картинках (.tid)')
 
 
+def check_ch():
+    """Рушій Compile Heart: спільний FFU і виправлення шрифтів обох ігор + автоматика
+    для незнайомої гри (без профілю). Оригінали — з backup/msk і backup/nep."""
+    print('\n=== Рушій Compile Heart (шрифти) ===')
+    from compileheart.ffu import Ffu
+    from compileheart import fontfix as chfix, scheme as chs
+    from maryskelter.bra import Bra
+    from maryskelter import fontfix as mfix
+    from neptunia.pac import Pac
+    from neptunia import fontfix as nfix
+    import translate_nep as t
+    fonts = []
+    p = os.path.join(HERE, 'backup', 'msk', 'System.bra')
+    if os.path.exists(p):
+        fonts.append(('msk', mfix, Bra.read_some(p, ['window\\font\\msgfont.ffu'])['window\\font\\msgfont.ffu']))
+    ns = type('a', (), {})()
+    ns.game_dir, ns.orig_dir = NEP, os.path.join(HERE, 'backup', 'nep')
+    fonts.append(('nep', nfix, Pac(t._orig(ns, t.SYSTEM)).read(t.FONTS[1])))
+    for game, mod, raw in fonts:
+        f = Ffu(raw)
+        assert f.build() == raw, f'{game}: FFU без змін не збирається в той самий файл'
+        _out, rep = mod.fix(raw)
+        assert not rep['missing'] and len(rep['added']) == 8, (game, rep)
+        sch, prof = chs.auto(f, used='')
+        _out, rep2 = chfix.fix(raw, sch, prof)
+        assert not rep2['missing'], (game, rep2['missing'])
+        if game == 'msk':
+            assert sch.slots == mfix.SLOT, sch.slots          # автоматика обрала ті самі слоти
+        else:
+            assert sch.codes == nfix.SCHEME.codes             # і ті самі однобайтові коди
+        print(f'OK  {game}: FFU {f.encoding}, профіль гри — і ї є ґ додано; без профілю — '
+              f'схема «{sch.kind}» та сама, що обрано вручну')
+
+
 if __name__ == '__main__':
     which = sys.argv[1] if len(sys.argv) > 1 else 'both'
     if which in ('both', 'msk'):
@@ -119,4 +153,6 @@ if __name__ == '__main__':
         check_crystar()
     if which in ('nep',):
         check_nep()
+    if which in ('ch',):
+        check_ch()
     print('\nВсе гаразд.')
