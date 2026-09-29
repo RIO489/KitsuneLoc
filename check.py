@@ -47,23 +47,42 @@ def check_msk():
 
 
 def check_crystar():
+    """Crystar: рядок таблиці, напис у префабі й шрифт — без запису на диск;
+    оригінали — з backup/crystar, якщо вони там є."""
     print('\n=== Crystar ===')
-    work, out = os.path.join(HERE, 'work', 'crystar'), os.path.join(HERE, 'out', 'crystar')
-    shutil.rmtree(out, ignore_errors=True)
-    run('translate_crystar.py', 'export', CRY, work, '--lang', 'en')
-    p, source, sid = poke(os.path.join(work, 'parameter', '*SystemMessage_en.json'))
-    run('translate_crystar.py', 'import', CRY, work, out, '--lang', 'en')
     import UnityPy
-    from crystar import scan
-    rel = source.rsplit('/', 1)
-    env = UnityPy.load(os.path.join(out, *rel[0].split('/')))
-    for o in env.objects:
-        if o.type.name == 'MonoBehaviour' and o.read().m_Name == rel[1]:
-            got = {f'{off:x}': s for off, ln, s in scan(o.get_raw_data())}
-            assert got[sid] == PROBE, got[sid]
-            print('OK  рядок підмінено, бандл перезібрано')
-            return
-    raise AssertionError('об\'єкт не знайдено у перезібраному бандлі')
+    import numpy as np
+    import translate_crystar as t
+    from crystar.unitystr import scan, rebuild
+    from unity import tmptext, fontfix
+    from unity.tmpfont import TmpFont, is_tmp_font
+    ns = type('a', (), {})()
+    ns.root, ns.orig_dir = CRY, os.path.join(HERE, 'backup', 'crystar')
+    env = UnityPy.load(t._src(ns, 'parameter'))
+    o = t.text_objects(env)[('Game.ScriptableSystemMessage', 'en')]
+    raw = o.get_raw_data()
+    ss = list(scan(raw))
+    new = [s for _o, _l, s in scan(rebuild(raw, {ss[1][0]: PROBE * 3}))]
+    assert new[1] == PROBE * 3 and new[2:] == [s for _o, _l, s in ss[2:]]
+    print('OK  таблиця (рядок утричі довший, решта на місці)')
+    env = UnityPy.load(t._src(ns, 'uiscene'))
+    items = tmptext.texts(env)
+    assert len(items) > 900, len(items)
+    o, _go, text = next(x for x in items if x[2] == 'Programmers')
+    raw = o.get_raw_data()
+    assert tmptext.with_text(raw, text) == raw
+    assert tmptext.text_field(tmptext.with_text(raw, PROBE))[2] == PROBE
+    print(f'OK  написи в префабах ({len(items)} TMP, підміна й повтор без змін)')
+    env = UnityPy.load(t._src(ns, 'uistatic'))
+    fixed = dict(fontfix.fix_bundle(env))
+    assert 'Stella-FOT_ja' in fixed, fixed
+    env = UnityPy.load(env.file.save(packer='original'))        # як запише імпорт
+    f = next(TmpFont(x.get_raw_data()) for x in env.objects
+             if x.type.name == 'MonoBehaviour' and is_tmp_font(x) and x.read().m_Name == 'Stella-FOT_ja')
+    by = f.by_char()
+    assert all(ord(c) in by for c in fontfix.UKR), 'немає і ї є ґ'
+    assert by[ord('э')]['adv'] < 0.8 * f.face['PointSize'], 'кирилиця досі повноширинна'
+    print('OK  шрифт: і ї є ґ І Ї Є Ґ додано, кирилиця з відступами латиниці')
 
 
 def check_nep():

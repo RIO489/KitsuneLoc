@@ -160,6 +160,7 @@ DEFAULT_BOOKS = {
         [r'^Event/ev_4\d{5}/', '12 Повторний прохід (ev_4)'],
         [r'^Event/ev_calling', '13 Дзвінки'],
         [r'^Event/', '14 Персонажі, NPC, магазин'],
+        [r'^prefab/', '15 Титри та написи інтерфейсу'],     # вписане в префаби (unity/tmptext.py)
     ],
     'msk': (
         [[r'^(TTM1\.bra/Text/|Game\.bra/StringData/|MarySkelter\.exe$)', '01 Інтерфейс']]

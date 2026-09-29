@@ -13,6 +13,10 @@
 
 Імпорт пише переклад у вибраний мовний слот (`--slot`) — у ВСІ бандли, де ця
 сцена трапляється. Гра має бути налаштована на мову тексту = слот.
+
+Ще: написи, вписані прямо в префаби інтерфейсу (титри, AUTO SAVE, SKIP…) — `prefab/<бандл>`
+(unity/tmptext.py; мовних копій немає), і шрифти гри — кирилиця з і ї є ґ та нормальними
+відступами (unity/fontfix.py). Обидва — у кожному імпорті, з чистих оригіналів.
 """
 import argparse, os, sys
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
@@ -23,6 +27,11 @@ import common as locfile
 
 LANGS = ('en', 'ja')
 FMT = 'unity-mb2'
+# Профіль гри (дані, не код): де лежать написи префабів і TMP-шрифти.
+PREFAB_BUNDLES = ('uiscene', 'uistatic')     # написи TMP у префабах (титри, AUTO SAVE, SKIP…)
+FONT_BUNDLES = ('uistatic',)                 # TMP-шрифти Stella-FOT_* з атласами
+PREFAB_FMT = 'unity-tmp'
+CREDITS = ('uiJobName', 'uiNameText', 'uiSectionText', 'uiTitleText')   # GameObject-и титрів
 
 
 def looks_like_key(s):
@@ -48,6 +57,72 @@ def bundles(root, orig_dir=None):
             if fn.startswith('ev_') and '_' in fn[3:]:
                 rel = os.path.join('Event', fn)
                 yield src(rel), 'Event/' + fn.rsplit('_', 1)[0], rel
+
+
+def _src(a, rel):
+    """Чистий оригінал (backup), якщо є, інакше файл гри."""
+    o = os.path.join(getattr(a, 'orig_dir', None) or '', rel)
+    return o if getattr(a, 'orig_dir', None) and os.path.exists(o) else os.path.join(a.root, rel)
+
+
+def _prefab_entry(go, text):
+    """Напис із префаба — рядок для перекладу? Японські заглушки (あ, テキスト, 9999), які гра
+    замінює текстом із таблиць, і налагоджувальні (BattleArea…) — ні."""
+    import re
+    t = text.strip()
+    if not re.search(r'[A-Za-z]{2}', t) or re.search(r'[\u3040-\u30ff\u4e00-\u9fff]', t):
+        return None
+    return {'ctx': 'Титри' if go in CREDITS else go}
+
+
+def export_prefabs(a):
+    from unity import tmptext
+    n = 0
+    for name in PREFAB_BUNDLES:
+        path = _src(a, name)
+        if not os.path.exists(path):
+            continue
+        entries = []
+        for o, go, text in tmptext.texts(UnityPy.load(path)):
+            e = _prefab_entry(go, text)
+            if e:
+                entries.append(dict(id=str(o.path_id), src=text, **e))
+        locfile.save_rich(a.work_dir, 'crystar', f'prefab/{name}', PREFAB_FMT, entries, {})
+        n += len(entries)
+    print(f'написи в префабах інтерфейсу (титри тощо): {n}')
+
+
+def import_prefabs(a):
+    """Написи префабів + шрифти: кожен бандл читається й пишеться один раз."""
+    from unity import tmptext, fontfix
+    total = 0
+    for name in sorted(set(PREFAB_BUNDLES) | set(FONT_BUNDLES)):
+        path = _src(a, name)
+        if not os.path.exists(path):
+            continue
+        env = UnityPy.load(path)
+        changed = 0
+        if name in PREFAB_BUNDLES:
+            doc = locfile.load_doc(a.work_dir, f'prefab/{name}')
+            tr = {e['id']: e for e in (doc or {}).get('entries', []) if e.get('tr')}
+            for o, _go, text in tmptext.texts(env) if tr else []:
+                e = tr.get(str(o.path_id))
+                if e and e['src'] == text and e['tr'] != text:
+                    o.set_raw_data(tmptext.with_text(o.get_raw_data(), e['tr']))
+                    changed += 1
+            if changed:
+                print(f'  {name}: написів у префабах {changed}')
+            total += changed
+        if name in FONT_BUNDLES:
+            for font, notes in fontfix.fix_bundle(env):
+                print(f'  шрифт {font}: ' + '; '.join(notes))
+                changed += 1
+        if changed:
+            dst = os.path.join(a.out_dir, name)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, 'wb') as f:
+                f.write(env.file.save(packer='original'))
+    return total
 
 
 def text_objects(env):
@@ -135,6 +210,7 @@ def cmd_export(a, progress=None):
             locfile.save_rich(a.work_dir, 'crystar', source, FMT, entries,
                               {'count': len(en), 'langs': ['en', 'ja'] if paired else ['en']})
             n_files += 1
+    export_prefabs(a)
     print(f'{n_files} таблиць/сцен експортовано'
           + (f', без японської пари: {n_unpaired}' if n_unpaired else ''))
     done, total = locfile.stats(a.work_dir)
@@ -183,6 +259,7 @@ def cmd_import(a, progress=None):
             f.write(env.file.save(packer='original'))
         total += changed
         print(f'  {rel}: {changed} рядків')
+    total += import_prefabs(a)
     print(f'Разом записано в слот «{slot}»: {total} рядків')
 
 

@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.3'
+VERSION = '2.4'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -712,6 +712,7 @@ class App(tk.Tk):
                      'neptunia.pac', 'neptunia.chars', 'neptunia.gbnl', 'neptunia.stcm',
                      'neptunia.ffu', 'neptunia.fontfix', 'neptunia.tid', 'neptunia.ssa',
                      'maryskelter.atlas', 'neptunia.atlas', 'neptunia.crowdin', 'neptunia',
+                     'unity.tmpfont', 'unity.sdf', 'unity.fontfix', 'unity.tmptext', 'unity',
                      'sheets', 'translate_msk', 'translate_crystar', 'translate_nep'):
             mod = sys.modules.get(name)
             if mod is not None:

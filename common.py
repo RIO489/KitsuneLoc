@@ -139,6 +139,9 @@ def looks_patched(path):
                     return True
                 p += 24 + nlen
             return False
+        if f.read(8) == b'UnityFS\0':
+            return _unity_patched(path)
+        f.seek(0)
         if low.endswith('.pac'):
             magic, _f, cnt, _s = struct.unpack('<8sIII', f.read(20))
             if magic != b'DW_PACK\0':
@@ -150,6 +153,25 @@ def looks_patched(path):
                     return True
             return False
     return None
+
+
+def _unity_patched(path):
+    """Бандл Unity: наш імпорт лишає в ньому українське — літеру «і» в TMP-шрифті
+    (unity/fontfix) чи кирилицю в написі префаба (unity/tmptext). Оригінали їх не мають."""
+    import UnityPy
+    from unity import tmptext
+    from unity.tmpfont import TmpFont, is_tmp_font
+    env = UnityPy.load(path)
+    for o in env.objects:
+        if o.type.name != 'MonoBehaviour':
+            continue
+        if is_tmp_font(o):
+            try:
+                if any(g['id'] == 0x456 for g in TmpFont(o.get_raw_data()).glyphs):
+                    return True
+            except ValueError:
+                pass
+    return any(any('\u0400' <= c <= '\u04ff' for c in text) for _o, _g, text in tmptext.texts(env))
 
 
 def is_original(path, want=None):
