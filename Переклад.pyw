@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.4'
+VERSION = '2.5'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -254,6 +254,12 @@ class App(tk.Tk):
             ttk.Radiobutton(self.slot_frame, text=label, value=val, variable=self.slot,
                             command=self._save_slot).pack(side='left', padx=8)
 
+        # написи на картинках (текстури) — окремо для кожної гри; вимкнено — у грі оригінальні
+        tf = ttk.Frame(gf); tf.pack(fill='x', padx=10, pady=2)
+        self.textures = tk.BooleanVar(value=self._textures_on())
+        ttk.Checkbutton(tf, text='Заливати в гру написи на картинках (текстури) і свої картинки',
+                        variable=self.textures, command=self._save_textures).pack(side='left')
+
         pf = ttk.Frame(gf); pf.pack(fill='x', padx=10, pady=(2, 10))
         ttk.Label(pf, text='Тека гри:').pack(side='left')
         self.path_var = tk.StringVar()
@@ -461,6 +467,8 @@ class App(tk.Tk):
     def _refresh_path(self):
         self._show_chibi()
         self.path_var.set(self.settings.get(self.game.get(), ''))
+        if hasattr(self, 'textures'):
+            self.textures.set(self._textures_on())
         if hasattr(self, 'slot_frame'):
             for w in self.slot_frame.winfo_children():
                 w.state(['!disabled'] if self.game.get() == 'crystar' else ['disabled'])
@@ -573,6 +581,16 @@ class App(tk.Tk):
             d[self.game.get()] = pc
             save_settings(self.settings)
         self._refresh_title()
+
+    def _textures_on(self, game=None):
+        return bool((self.settings.get('textures') or {}).get(game or self.game.get(), True))
+
+    def _save_textures(self):
+        self.settings.setdefault('textures', {})[self.game.get()] = bool(self.textures.get())
+        save_settings(self.settings)
+        self.say('Написи на картинках ' + ('заливатимуться в гру.' if self.textures.get() else
+                 'не заливатимуться: при «2» у грі будуть оригінальні текстури '
+                 '(уже перекладені повернуться до оригіналу).'), 'dim')
 
     def _save_slot(self):
         self.settings['crystar_slot'] = self.slot.get()
@@ -703,15 +721,16 @@ class App(tk.Tk):
         поки вікно відкрите, воно одразу працює з новою версією."""
         import importlib
         for name in ('common', 'crystar.unitystr', 'crystar.tags', 'crystar',
-                     'compileheart.ffu', 'compileheart.fontfix', 'compileheart.scheme', 'compileheart',
+                     'compileheart.ffu', 'compileheart.fontfix', 'compileheart.scheme', 'compileheart.archive',
+                     'compileheart.profiles', 'compileheart',
                      'maryskelter.bra', 'maryskelter.gbnl', 'maryskelter.cl3',
                      'maryskelter.textdata', 'maryskelter.chars',
                      'maryskelter.enc', 'maryskelter.table', 'maryskelter.lzo1x',
                      'maryskelter.cpk', 'maryskelter.ffu', 'maryskelter.fontfix',
-                     'maryskelter',
+                     'maryskelter.profile', 'maryskelter',
                      'neptunia.pac', 'neptunia.chars', 'neptunia.gbnl', 'neptunia.stcm',
                      'neptunia.ffu', 'neptunia.fontfix', 'neptunia.tid', 'neptunia.ssa',
-                     'maryskelter.atlas', 'neptunia.atlas', 'neptunia.crowdin', 'neptunia',
+                     'maryskelter.atlas', 'neptunia.atlas', 'neptunia.crowdin', 'neptunia.profile', 'neptunia',
                      'unity.tmpfont', 'unity.sdf', 'unity.fontfix', 'unity.tmptext', 'unity',
                      'sheets', 'translate_msk', 'translate_crystar', 'translate_nep'):
             mod = sys.modules.get(name)
@@ -1002,6 +1021,9 @@ class App(tk.Tk):
         ns = type('a', (), {})()
         ns.work_dir, ns.out_dir, ns.orig_dir = work, out, bk
         ns.pics_dir = xl                # свої картинки перекладача: <xl>\Свої картинки (pics.py)
+        ns.textures = self._textures_on(g)   # галочка «Заливати в гру написи на картинках»
+        if not ns.textures:
+            self.say('Написи на картинках вимкнено — текстури в гру не заливаю.', 'dim')
         if g == 'msk':
             import translate_msk as t
             ns.game_dir = self.root_dir()

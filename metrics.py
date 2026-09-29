@@ -7,61 +7,49 @@
 кожного гліфа. Таблиця {символ: ширина} кешується поруч з work, бо Neptunia
 розпаковує шрифт кілька секунд.
 
-Mary Skelter і Neptunia: у msgfont і sysfont ширини однакові (перевірено),
-тож таблиця одна на гру. Crystar — шрифтів не розбирали, None.
+Шрифт, схема символів (як текст стає гліфами) і службові коди — з профілю гри рушія
+(compileheart/profiles.py); код один для всіх ігор. У MSK msgfont і sysfont однакові,
+у Neptunia головне вікно — advfont. Гра без профілю (Crystar) — None.
 """
-import json, os, re
+import json, os
 
-MSK_FONT = ('System.bra', 'window\\font\\msgfont.ffu')
-NEP_FONT = ('data/SYSTEM00000.pac', 'window/font/msgfont.ffu')
-# Neptunia: головне вікно діалогу малює advfont (ширший), історія діалогів — msgfont
-NEP_FONTS = {'msg': 'window/font/msgfont.ffu', 'adv': 'window/font/advfont.ffu'}
 
-# службові коди не малюються: прибираємо перед вимірюванням
-_MSK_CODE = re.compile(r'%[-+ 0#]*\d*(?:\.\d+)?[a-zA-Z]|#[A-Za-mo-z]')
-_NEP_CODE = re.compile(r'#[A-Za-z]+(?:\[[^\]]*\])?|%[-+0#]*\d*(?:\.\d+)?(?:ll|l|h)?[a-zA-Z%]|<[A-Z]+>')
+def _profile(game):
+    from compileheart import profiles
+    return profiles.get(game)
 
 
 def _font_file(game, backup_dir):
-    arc = MSK_FONT[0] if game == 'msk' else NEP_FONT[0]
-    p = os.path.join(backup_dir, *arc.split('/'))
+    prof = _profile(game)
+    if prof is None:
+        return None
+    p = os.path.join(backup_dir, *prof.FONT_ARCHIVE.split('/'))
     return p if os.path.exists(p) else None
 
 
+def game_font(game, path, font='msg'):
+    """(FFU шрифту гри після fontfix, схема, профіль) — те саме, що кладе в гру «2»."""
+    from compileheart import archive
+    from compileheart.ffu import Ffu
+    prof = _profile(game)
+    data, _rep = prof.fix(archive.read(path, prof.FONTS[font]))
+    return Ffu(data), prof.SCHEME, prof
+
+
 def _build(game, path, font='msg'):
-    if game == 'msk':
-        from maryskelter.bra import Bra
-        from maryskelter import fontfix, ffu, chars
-        data, _rep = fontfix.fix(Bra.read_some(path, [MSK_FONT[1]])[MSK_FONT[1]])
-        f = ffu.Ffu(data)
-        tab = {}
-        for key, i in f.map.items():
-            try:
-                ch = key.to_bytes((key.bit_length() + 7) // 8 or 1, 'big').decode('utf-8')
-            except UnicodeDecodeError:
-                continue
-            if len(ch) == 1 and i < len(f.entries):
-                tab[ch] = f.entries[i][0]
-        for ua, slot in chars.SUBST.items():          # і ї є ґ лежать у слотах ì ò ù ã
-            if slot in tab:
-                tab[ua] = tab[slot]
-        return tab
-    from neptunia.pac import Pac
-    from neptunia import fontfix, ffu, chars
-    data, _rep = fontfix.fix(Pac(path).read(NEP_FONTS[font]))
-    f = ffu.Ffu(data)
+    f, scheme, _prof = game_font(game, path, font)
     tab = {}
     for code, i in f.map.items():
         if i >= len(f.entries):
             continue
-        raw = bytes([code]) if code < 0x100 else code.to_bytes(2, 'big')
+        raw = code.to_bytes((code.bit_length() + 7) // 8 or 1, 'big')
         try:
-            ch = chars.decode(raw)
+            ch = scheme.decode(raw)
         except Exception:
             continue
         if len(ch) == 1:
             tab.setdefault(ch, f.entries[i][0])
-    for ch, code in list(chars.CODE.items()) + list(getattr(chars, "QUOTES", {}).items()):  # укр. літери, « »
+    for ch, code in scheme.letters(f):            # і ї є ґ у слотах / однобайтові літери, « »
         i = f.index(code)
         if i is not None:
             tab[ch] = f.entries[i][0]
@@ -72,7 +60,8 @@ def table(game, backup_dir, cache_dir, font='msg'):
     """{символ: ширина в px} або None (немає шрифту чи гра без метрик).
     font — 'msg' (msgfont: інтерфейс, таблиці, історія діалогів) або 'adv'
     (Neptunia: advfont головного вікна діалогу)."""
-    if game not in ('msk', 'nep') or (font != 'msg' and game != 'nep'):
+    prof = _profile(game)
+    if prof is None or font not in prof.FONTS:
         return None
     path = _font_file(game, backup_dir)
     if not path:
@@ -103,7 +92,8 @@ def _code_sig():
     """Кеш застаріває, коли міняється fontfix (інші відступи — інші ширини)."""
     here = os.path.dirname(os.path.abspath(__file__))
     out = []
-    for p in ('maryskelter/fontfix.py', 'neptunia/fontfix.py', 'neptunia/chars.py',
+    for p in ('maryskelter/fontfix.py', 'neptunia/fontfix.py', 'neptunia/chars.py', 'maryskelter/chars.py',
+              'maryskelter/profile.py', 'neptunia/profile.py',
               'compileheart/fontfix.py', 'compileheart/ffu.py', 'compileheart/scheme.py'):
         try:
             out.append(str(int(os.path.getmtime(os.path.join(here, p)))))
@@ -113,10 +103,10 @@ def _code_sig():
 
 
 def width(line, tab, game):
-    """Ширина одного рядка в пікселях (службові коди не рахуються)."""
-    line = (_MSK_CODE if game == 'msk' else _NEP_CODE).sub('', line)
-    if game == 'nep':                   # ’ -> ', … -> ... — як запише імпорт
-        from neptunia import chars
-        line = chars.plain(line)
+    """Ширина одного рядка в пікселях (службові коди не рахуються; символи — як їх
+    запише імпорт: ’ -> ', … -> ... у Shift-JIS-схемі)."""
+    prof = _profile(game)
+    if prof is not None:
+        line = prof.SCHEME.plain(prof.CODES.sub('', line))
     avg = tab.get('n') or 12
     return sum(tab.get(ch, avg) for ch in line)

@@ -19,7 +19,6 @@ from openpyxl.utils import get_column_letter
 
 import common as locfile
 from crystar import tags
-from maryskelter import chars as mchars
 
 NAMES = '@names'
 COL_SRC, COL_ID, COL_TR, COL_NOTE, COL_HINT = 'файл', 'id', 'Переклад', 'Примітка', 'Підказка'
@@ -92,7 +91,7 @@ def _scene(source):
 
 
 # службові коди Mary Skelter: printf-формати й #-коди (крім переносу #n)
-MSK_CODE = re.compile(r'%[-+ 0#]*\d*(?:\.\d+)?[a-zA-Z]|#[A-Za-mo-z]')
+from maryskelter.profile import CODES as MSK_CODE          # noqa: E402
 
 
 def msk_codes(text):
@@ -113,7 +112,7 @@ def msk_hint(src, cap=None):
 
 # службові коди Neptunia: #FontColor[%u] / #FontColorB, %s %04u %llu %%, <BLANK>
 # (перенос рядка в книзі — звичайний Enter, у файлах гри це #n або \n)
-NEP_CODE = re.compile(r'#[A-Za-z]+(?:\[[^\]]*\])?|%[-+0#]*\d*(?:\.\d+)?(?:ll|l|h)?[a-zA-Z%]|<[A-Z]+>')
+from neptunia.profile import CODES as NEP_CODE             # noqa: E402
 
 
 def nep_codes(text):
@@ -705,22 +704,17 @@ def limits(docs, backup_dir, cache_dir, widths=None):
     game = next((d.get('game') for d in docs), None)
     wtab = metrics.table(game, backup_dir, cache_dir) if game else None
     gmax, gcount, glines = {}, {}, {}
-    # екрани, де видно репліку: головне вікно й історія діалогів (Neptunia — різні шрифти:
-    # advfont і msgfont; MSK — той самий msgfont, але різна ширина). 'id' — ключ DIALOG_WIDTH
+    # екрани, де видно репліку (головне вікно, історія діалогів…), їхні шрифти й виміряна
+    # в грі ширина — з профілю гри (SCREENS); 'id' — ключ меж перекладача (межі.json)
     screens = []
-    if wtab:
-        if game == 'nep':
-            adv = metrics.table(game, backup_dir, cache_dir, 'adv')
-            if adv:
-                screens.append({'назва': 'головне вікно діалогу', 'id': 'adv', 'font': 'adv',
-                                'wtab': adv, 'w': []})
-            screens.append({'назва': 'вікно історії діалогів', 'id': 'msg', 'font': 'msg',
-                            'wtab': wtab, 'w': []})
-        else:
-            screens.append({'назва': 'вікно діалогу', 'id': 'msg', 'font': 'msg', 'wtab': wtab, 'w': []})
-            if (game, 'log') in DIALOG_WIDTH:
-                screens.append({'назва': 'вікно історії діалогів', 'id': 'log', 'font': 'msg',
-                                'wtab': wtab, 'w': []})
+    prof = _profile(game)
+    if wtab and prof is not None:
+        for k, sc in enumerate(prof.SCREENS):
+            tab = wtab if sc['font'] == 'msg' else metrics.table(game, backup_dir, cache_dir, sc['font'])
+            # вікно з виміряною в грі шириною — завжди; невиміряне — лише перше (за оригіналами)
+            if tab and (sc.get('px') or k == 0):
+                screens.append({'назва': sc['назва'], 'id': sc['id'], 'font': sc['font'], 'px': sc.get('px'),
+                                'wtab': tab, 'w': []})
     for doc in docs:
         for e in doc['entries']:
             g = _width_group(doc, e)
@@ -735,26 +729,18 @@ def limits(docs, backup_dir, cache_dir, widths=None):
                     for sc in screens:
                         sc['w'] += [metrics.width(x, sc['wtab'], game) for x in e['src'].split('\n')]
     for sc in screens:
-        # межа вікна — виміряна в грі (DIALOG_WIDTH), інакше не найширший оригінал
+        # межа вікна — виміряна в грі (профіль: SCREENS px), інакше не найширший оригінал
         # (там бувають викиди, що й у грі не влазять: «(´・ω・｀) Aaaaaah...» у
         # Neptunia), а 99,9% рядків оригіналу
         w = sorted(sc.pop('w')) or [0]
-        sc['lim0'] = DIALOG_WIDTH.get((game, sc['id'])) or w[min(len(w) - 1, int(len(w) * DIALOG_PCT))]
+        sc['lim0'] = sc.pop('px') or w[min(len(w) - 1, int(len(w) * DIALOG_PCT))]
         sc['lim'] = (widths or {}).get(sc['id']) or sc['lim0']
     return {'wtab': wtab, 'game': game, 'gmax': gmax, 'gcount': gcount, 'glines': glines,
             'screens': screens}
 
 
 DIALOG_PCT = 0.999          # частка рядків оригіналу, що мусить уміститися у вікні діалогу
-# Ширина вікна діалогу, виміряна в грі (px шрифту гри): тестові рядки, де гра обрізає текст
-# (2026-09-26, п'ять рядків на кожне вікно дали ту саму межу ±4 px). Гра не переносить — обрізає.
-DIALOG_WIDTH = {('nep', 'adv'): 790,        # головне вікно, advfont: видно 787, обрізано з 794
-                ('nep', 'msg'): 726,        # історія діалогів, msgfont: видно 723, обрізано з 730
-                # MSK (2026-09-26, рядок-лінійка): головне вікно НЕ обрізає — текст лізе на рамку;
-                # внутрішній край вікна ≈ x 1755 з 1920 при масштабі 1,056 екр. px на px шрифту →
-                # ≈1290, беремо 1280. Історія (Backlog) обрізає: видно 1032, зникло з 1044
-                ('msk', 'msg'): 1280,
-                ('msk', 'log'): 1036}
+# Ширина вікон діалогу, виміряна в грі, — у профілях ігор (maryskelter/profile.py, neptunia/profile.py: SCREENS).
 
 
 WIDTHS_FILE = 'межі.json'   # Переклад\<гра>\межі.json: {id екрана: px} — перекладач сам поправив межу
@@ -805,6 +791,17 @@ def width_limit(doc, e, ctx, screen=None):
     return lim, lines, wsrc
 
 
+def _profile(game):
+    """Профіль гри рушія Compile Heart (схема символів, коди, шрифти, вікна) або None."""
+    from compileheart import profiles
+    return profiles.get(game)
+
+
+def _codes(prof, text):
+    import collections
+    return collections.Counter(prof.CODES.findall(text or ''))
+
+
 def check_entry(doc, e, ctx, terms=None, tagdict=None):
     """Попередження до перекладу одного рядка (без source/id); ctx — limits()."""
     import glossary, metrics
@@ -847,26 +844,23 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
             if len(b) > max(len(a) + 6, len(a) * 1.35):
                 out.append(f'рядок довший за оригінал: {len(a)} -> {len(b)} символів')
                 break
-    if doc.get('game') == 'msk':
-        bad = mchars.missing(tr)
+    prof = _profile(doc.get('game'))
+    sch = prof.SCHEME if prof else None
+    if sch is not None:
+        bad = sch.bad_chars(tr)
         if bad:
-            out.append(f"гра не покаже: {' '.join(bad)} (потрібен гліф у шрифті)")
-        res = sorted(set(tr) & getattr(mchars, 'RESERVED', set()))
+            out.append(f"гра не покаже: {' '.join(bad)} ({sch.bad_note})")
+        res = sorted(set(tr) & sch.reserved())
         if res:
             out.append(f"у грі замість {' '.join(res)} з'являться українські "
                        f"літери — прибери ці символи")
-    if doc.get('game') == 'nep':
-        from neptunia import chars as nchars
-        bad = nchars.bad_chars(tr)
-        if bad:
-            out.append(f"гра не покаже: {' '.join(bad)} (буде «?»)")
-        for c, n in (nep_codes(src) - nep_codes(tr)).items():
+        want, got = _codes(prof, src), _codes(prof, tr)
+        for c, n in (want - got).items():
             out.append(f'бракує коду {c}' + (f' ×{n}' if n > 1 else ''))
-        for c in nep_codes(tr) - nep_codes(src):
-            out.append(f'зайвий код {c}')
-    if e.get('cap') and doc.get('game') == 'nep':
-        from neptunia import chars as nchars
-        need = len(nchars.encode(tr, 'replace')) + 1
+        for c in got - want:
+            out.append(f'зайвий код {c} — гра може впасти')
+    if e.get('cap') and sch is not None and sch.kind == 'bytes':
+        need = sch.cap_len(tr) + 1          # поле фіксованої довжини: однобайтові літери = символи
         if need > e['cap']:
             out.append(f"задовго: {need - 1} при ліміті {e['cap'] - 1} символів — "
                        f"лишиться англійським")
@@ -874,13 +868,6 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
         need = len(tr.encode(enc or 'utf-8', 'replace')) + 1
         if need > e['cap']:
             out.append(f"задовго: {need} Б при ліміті {e['cap']} Б")
-    if doc.get('game') == 'msk':
-        miss = msk_codes(src) - msk_codes(tr)
-        for c, n in miss.items():
-            out.append(f'бракує коду {c}' + (f' ×{n}' if n > 1 else ''))
-        extra = msk_codes(tr) - msk_codes(src)
-        for c in extra:
-            out.append(f'зайвий код {c} — гра може впасти')
     if is_cry and tagdict is not None:
         for pr in tags.check(src, tr, tagdict):
             out.append(pr)

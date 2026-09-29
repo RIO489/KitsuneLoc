@@ -306,6 +306,11 @@ def cmd_import(a, progress=None):
         print(f'  {arc_}: перепаковую архів текстур…')
         Bra(_orig(a, arc_)).repack(os.path.join(a.out_dir, arc_), rp,
                                    progress=_packer(progress, arc_))
+    if not getattr(a, 'textures', True):
+        # текстури вимкнено, а в грі вони вже перекладені раніше — повернути оригінали
+        arcs = {_atlas_path(s)[0] for s in _atlas_marks()}
+        for arc_ in locfile.restore_originals(arcs, a.orig_dir, a.game_dir, a.out_dir, a.work_dir):
+            print(f'  {arc_}: повертаю оригінальні текстури')
     for w in warns[:30]:
         print('  !', w)
     if len(warns) > 30:
@@ -718,8 +723,12 @@ def _export_atlas(a):
 
 
 def _import_atlas(a):
-    """Перемалювати атласи за перекладом. Повертає {архів: {файл: байти CL3}}."""
+    """Перемалювати атласи за перекладом. Повертає {архів: {файл: байти CL3}}.
+    a.textures = False — не малювати (перекладач написи не перекладає)."""
     import pics
+    if not getattr(a, 'textures', True):
+        print('  написи на картинках і свої картинки: вимкнено — у грі оригінальні текстури')
+        return {}
     doc = locfile.load_doc(a.work_dir, ATLAS_SRC)
     # порожньо або те саме, що в оригіналі, — спрайт лишається як був
     tr = {e['id']: e['tr'] for e in (doc or {}).get('entries', []) if e.get('tr') and e['tr'] != e['src']}

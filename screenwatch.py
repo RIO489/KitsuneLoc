@@ -162,6 +162,14 @@ _g32.GetDIBits.argtypes = [wintypes.HDC, wintypes.HBITMAP, wintypes.UINT, wintyp
                            ctypes.c_void_p, ctypes.c_void_p, wintypes.UINT]
 _u32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
 _u32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+try:                                                   # Windows 10 1607+
+    _u32.GetWindowDpiAwarenessContext.restype = ctypes.c_void_p
+    _u32.GetWindowDpiAwarenessContext.argtypes = [wintypes.HWND]
+    _u32.SetThreadDpiAwarenessContext.restype = ctypes.c_void_p
+    _u32.SetThreadDpiAwarenessContext.argtypes = [ctypes.c_void_p]
+    _DPI_CTX = True
+except AttributeError:
+    _DPI_CTX = False
 _k32.OpenProcess.restype = wintypes.HANDLE
 _k32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
                                             ctypes.POINTER(wintypes.DWORD)]
@@ -214,7 +222,26 @@ class _BMIH(ctypes.Structure):
 
 
 def grab(hwnd):
-    """Кадр клієнтської частини вікна (PIL RGB) або None."""
+    """Кадр клієнтської частини вікна (PIL RGB) або None.
+
+    Розміри й координати беремо в DPI-контексті САМОГО вікна гри. Наша програма для
+    Windows «не знає DPI», тож за масштабу 150% розмір вікна гри, яка сама враховує DPI
+    (Mary Skelter), приходив у логічних пікселях (1280×720 замість 1920×1080), а PrintWindow
+    малював фізичні — у кадр потрапляв лише верхній лівий кут. Гра, що DPI не враховує
+    (Neptunia), так і лишається в логічних — як було."""
+    old_ctx = None
+    if _DPI_CTX:
+        ctx = _u32.GetWindowDpiAwarenessContext(hwnd)
+        if ctx:
+            old_ctx = _u32.SetThreadDpiAwarenessContext(ctx)
+    try:
+        return _grab(hwnd)
+    finally:
+        if old_ctx:
+            _u32.SetThreadDpiAwarenessContext(old_ctx)
+
+
+def _grab(hwnd):
     from PIL import Image, ImageGrab
     r = wintypes.RECT()
     if not _u32.GetClientRect(hwnd, ctypes.byref(r)) or r.right < 32 or r.bottom < 32:
@@ -239,11 +266,19 @@ def grab(hwnd):
         _g32.DeleteDC(mdc)
         _u32.ReleaseDC(hwnd, wdc)
     if img is None or img.convert('L').getextrema()[1] < 8:
-        # повноекранний режим: PrintWindow дає чорне — беремо ділянку екрана
-        pt = wintypes.POINT(0, 0)
-        _u32.ClientToScreen(hwnd, ctypes.byref(pt))
+        # повноекранний режим: PrintWindow дає чорне — беремо ділянку екрана. Pillow знімає
+        # екран у фізичних пікселях — тож і рамку вікна беремо у фізичних (контекст -4:
+        # PER_MONITOR_AWARE_V2), незалежно від того, чи гра знає про DPI
+        prev = _u32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4)) if _DPI_CTX else None
         try:
-            img = ImageGrab.grab(bbox=(pt.x, pt.y, pt.x + w, pt.y + h), all_screens=True)
+            _u32.GetClientRect(hwnd, ctypes.byref(r))
+            pt = wintypes.POINT(0, 0)
+            _u32.ClientToScreen(hwnd, ctypes.byref(pt))
+        finally:
+            if prev:
+                _u32.SetThreadDpiAwarenessContext(prev)
+        try:
+            img = ImageGrab.grab(bbox=(pt.x, pt.y, pt.x + r.right, pt.y + r.bottom), all_screens=True)
         except OSError:
             return None
     return img
@@ -324,16 +359,18 @@ class Ocr:
 
 class GameFontOcr:
     """Свій розпізнавач шрифтами гри (fontocr.py) з тим самим lines(), що в Ocr.
-    Neptunia: advfont (головне вікно діалогу) і msgfont (історія, імена, меню).
-    На 133 кадрах гри знаходить рядків удвічі більше, ніж англійський Windows OCR
-    (той українську читає латинськими «двійниками» або не читає зовсім)."""
+    Шрифти — усі з профілю гри рушія (Neptunia: advfont — головне вікно діалогу, msgfont —
+    історія, імена, меню; MSK: msgfont). На 133 кадрах Neptunia знаходить рядків удвічі
+    більше, ніж англійський Windows OCR (той українську читає латинськими «двійниками»
+    або не читає зовсім). На кадрах MSK ще не перевірявся."""
 
     def __init__(self, game, backup_dir):
         import fontocr, preview
-        if game != 'nep':
+        from compileheart import profiles
+        prof = profiles.get(game)
+        if prof is None:
             raise ValueError('шрифти цієї гри для розпізнавання не підготовлено')
-        self.ocr = fontocr.FontOCR({'adv': preview.GameFont(game, backup_dir, 'adv'),
-                                    'msg': preview.GameFont(game, backup_dir, 'msg')})
+        self.ocr = fontocr.FontOCR({name: preview.GameFont(game, backup_dir, name) for name in prof.FONTS})
 
     def lines(self, img):
         return [(t, b) for t, b, _m in self.ocr.read_frame(img)]

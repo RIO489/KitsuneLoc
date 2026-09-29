@@ -130,8 +130,9 @@ class WatchWindow(tk.Toplevel):
                     if r and r['kind'] != 'key' and t.strip() and \
                             sk(t) not in (sk(r['e']['src']), sk(r['e'].get('tr', ''))):
                         items.append((r['k'], 'game', t))
-        if self.font_ocr is None and self.pr.game == 'nep':
-            # свій розпізнавач шрифтами гри; один на вікно — знайдені масштаби не губляться
+        if self.font_ocr is None:
+            # свій розпізнавач шрифтами гри (будь-яка гра з профілем рушія; без профілю —
+            # виняток і Windows OCR); один на вікно — знайдені масштаби не губляться
             try:
                 self.font_ocr = screenwatch.GameFontOcr(self.pr.game, self.ed.bk)
             except Exception:                               # noqa: BLE001

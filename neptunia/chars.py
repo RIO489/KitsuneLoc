@@ -37,83 +37,19 @@ FALLBACK = {'Ъ': 'Ь', 'ъ': 'ь', 'Ы': 'И', 'ы': 'и', 'Э': 'Є', 'э': '�
 PREFER = {'’': "'", '‘': "'", '…': '...'}
 
 
-def _halfwidth(ch):
-    """Півширинна катакана (｢ ｡ ･ ﾟ…) у cp932 однобайтова — тобто потрапила б у
-    слоти нашої кирилиці. Пишемо повноширинною (｢ -> 「)."""
-    import unicodedata
-    if not '｡' <= ch <= 'ﾟ':
-        return None
-    # ﾞ ﾟ після NFKC — комбіновані знаки, яких у cp932 немає
-    return {'ﾞ': '゛', 'ﾟ': '゜'}.get(ch) or unicodedata.normalize('NFKC', ch)
+# стара схема перекладу (Crowdin/stcm-editor): і ї є ґ писались грецькими літерами
+# Shift-JIS; так вони лежать у старих сейвах (назва локації тощо) — fontfix малює там літери
+OLD_SUBST = {'І': 0x839F, 'Ї': 0x83A0, 'Ґ': 0x83A1, 'Є': 0x83A2,
+             'і': 0x83BF, 'ї': 0x83C0, 'ґ': 0x83C1, 'є': 0x83C2}
 
+# Уся логіка кодування — спільна для Shift-JIS-рушіїв (compileheart/scheme.ByteScheme);
+# тут лише дані цієї гри. Функції нижче — старий API (ним користуються translate_nep, gbnl…).
+from compileheart.scheme import ByteScheme as _ByteScheme          # noqa: E402
 
-def plain(text):
-    """Текст таким, яким його побачить гра: замість ’ … ｢ — те, що запишемо
-    (для прев'ю й ширини: `…` у грі — три крапки, а не один широкий знак)."""
-    return ''.join(PREFER.get(ch) or _halfwidth(ch) or ch for ch in text)
-
-
-RAW = 0xF700          # байт, якого немає в cp932, у тексті = chr(RAW + байт)
-
-
-def encode(text, errors='strict'):
-    """Рядок -> байти гри (cp932 + наші однобайтові літери)."""
-    out = bytearray()
-    for ch in text:
-        b = CODE.get(ch) or QUOTES.get(ch)
-        if b is not None:
-            out.append(b)
-            continue
-        if RAW <= ord(ch) < RAW + 256:
-            out.append(ord(ch) - RAW)
-            continue
-        alt = PREFER.get(ch) or _halfwidth(ch)
-        if alt is not None and alt != ch:
-            out += encode(alt, errors)
-            continue
-        try:
-            out += ch.encode('cp932')
-        except UnicodeEncodeError:
-            alt = FALLBACK.get(ch)
-            if alt is not None:
-                out += encode(alt, errors)
-            elif errors == 'strict':
-                raise
-            else:
-                out += b'?'
-    return bytes(out)
-
-
-def bad_chars(text):
-    """Символи, яких гра не покаже (немає ні в cp932, ні в нашій схемі)."""
-    bad = set()
-    for ch in text or '':
-        if ch in CODE or ch in QUOTES or ch in FALLBACK or RAW <= ord(ch) < RAW + 256:
-            continue
-        try:
-            ch.encode('cp932')
-        except UnicodeEncodeError:
-            bad.add(ch)
-    return sorted(bad)
-
-
-def decode(raw):
-    """Байти гри -> рядок. Однобайтові 0xA1–0xDF і 0xFD–0xFF — наша кирилиця
-    (в оригінальних англійських файлах їх немає, тож читати так можна завжди)."""
-    out, i, n = [], 0, len(raw)
-    while i < n:
-        b = raw[i]
-        if b in LETTER:
-            out.append(LETTER[b]); i += 1
-        elif (0x81 <= b <= 0x9f or 0xe0 <= b <= 0xfc) and i + 1 < n:
-            try:
-                out.append(raw[i:i + 2].decode('cp932')); i += 2
-            except UnicodeDecodeError:
-                out.append(chr(RAW + b)); i += 1
-        else:
-            try:
-                out.append(raw[i:i + 1].decode('cp932'))
-            except UnicodeDecodeError:
-                out.append(chr(RAW + b))
-            i += 1
-    return ''.join(out)
+SCHEME = _ByteScheme(CODE, legacy=OLD_SUBST, quotes=QUOTES, fallback=FALLBACK, prefer=PREFER)
+RAW = SCHEME.RAW          # байт, якого немає в cp932, у тексті = chr(RAW + байт)
+_halfwidth = SCHEME._halfwidth
+plain = SCHEME.plain      # текст, як його побачить гра (для прев'ю й ширини)
+encode = SCHEME.encode    # рядок -> байти гри (cp932 + наші однобайтові літери)
+bad_chars = SCHEME.bad_chars
+decode = SCHEME.decode    # байти гри -> рядок

@@ -28,34 +28,13 @@ class GameFont:
     """Гліфи шрифту діалогів гри: glyph(символ) -> (xadv, маска L) або None."""
 
     def __init__(self, game, backup_dir, font='msg'):
+        """Шрифт гри після fontfix (як заливає «2») і схема символів — з профілю рушія."""
         self.game = game
-        if game == 'msk':
-            from maryskelter.bra import Bra
-            from maryskelter import fontfix, ffu, chars
-            path = os.path.join(backup_dir, metrics.MSK_FONT[0])
-            data, _ = fontfix.fix(Bra.read_some(path, [metrics.MSK_FONT[1]])[metrics.MSK_FONT[1]])
-            self.f = ffu.Ffu(data)
-            self._code = lambda ch: chars.SUBST.get(ch, ch)     # і ї є ґ — у слотах ì ò ù ã
-            self._get = lambda c: self.f.glyph(c)
-            self.code_re = metrics._MSK_CODE
-        elif game == 'nep':
-            from neptunia.pac import Pac
-            from neptunia import fontfix, ffu, chars
-            path = os.path.join(backup_dir, *metrics.NEP_FONT[0].split('/'))
-            data, _ = fontfix.fix(Pac(path).read(metrics.NEP_FONTS[font]))
-            self.f = ffu.Ffu(data)
-
-            def code(ch):
-                try:
-                    raw = chars.encode(ch)
-                except Exception:
-                    return None
-                return raw[0] if len(raw) == 1 else int.from_bytes(raw, 'big')
-            self._code = code
-            self._get = lambda c: None if c is None else self.f.glyph(c)
-            self.code_re = metrics._NEP_CODE
-        else:
+        path = metrics._font_file(game, backup_dir)
+        if path is None:
             raise ValueError('шрифт цієї гри не розібрано')
+        self.f, self.scheme, prof = metrics.game_font(game, path, font)
+        self.code_re = prof.CODES
         self.cell_h = self.f.cell_h
         self.cache = {}
 
@@ -64,7 +43,8 @@ class GameFont:
             return self.cache[ch]
         got = None
         try:
-            g = self._get(self._code(ch))
+            code = self.scheme.text_code(ch, self.f)       # і -> слот ì / однобайтовий код …
+            g = None if code is None else self.f.glyph(code)
         except Exception:
             g = None
         if g:
@@ -78,11 +58,8 @@ class GameFont:
         return got
 
     def clean(self, line):
-        line = self.code_re.sub('', line)
-        if self.game == 'nep':              # ’ -> ', … -> ... — як запише імпорт
-            from neptunia import chars
-            line = chars.plain(line)
-        return line
+        """Рядок, як його намалює гра: без службових кодів, ’ -> ', … -> ... (якщо так пише схема)."""
+        return self.scheme.plain(self.code_re.sub('', line))
 
 
 def render(font, text, limit, max_lines=None, name=None, dialog=False):

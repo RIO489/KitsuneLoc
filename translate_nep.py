@@ -352,6 +352,12 @@ def cmd_import(a, progress=None):
     print(f'  усього рядків перекладу: {n_all}')
     for arc in pics:
         print(f'! написи для {arc}: такого архіву в грі немає')
+    if not getattr(a, 'textures', True):
+        # текстури вимкнено, а в грі вони вже перекладені раніше — повернути оригінали
+        from neptunia import atlas as natl
+        arcs = {natl.split_src(s)[0] for s in natl.load_marks()}
+        for arc in locfile.restore_originals(arcs, a.orig_dir, a.game_dir, a.out_dir, a.work_dir):
+            print(f'  {arc}: повертаю оригінальні текстури')
     for w in warns[:30]:
         print('  !', w)
     if len(warns) > 30:
@@ -445,7 +451,11 @@ def _menu_translations(a):
 
 
 def _import_atlas(a):
-    """Перемалювати текстури за перекладом. -> {архів: {файл: байти .tid}}."""
+    """Перемалювати текстури за перекладом. -> {архів: {файл: байти .tid}}.
+    a.textures = False — не малювати (перекладач написи не перекладає)."""
+    if not getattr(a, 'textures', True):
+        print('  написи на картинках і свої картинки: вимкнено — у грі оригінальні текстури')
+        return {}
     from neptunia import atlas as natl
     from maryskelter import atlas as atl
     import pics

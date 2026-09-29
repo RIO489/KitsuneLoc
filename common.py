@@ -182,6 +182,26 @@ def is_original(path, want=None):
     return looks_patched(path) is False
 
 
+def restore_originals(rels, orig_dir, game_dir, out_dir, work_dir):
+    """Написи на картинках вимкнено («2» без текстур), а в теці гри лежить уже перекладений
+    архів текстур — кладемо в out його оригінал з backup (гра знову покаже оригінальні
+    картинки). Лише архіви, в яких немає нашого тексту: змішані (текст + текстури)
+    перезбирає з оригіналу сам імпорт тексту. Повертає [архіви, які повернено]."""
+    import shutil
+    done = []
+    for rel in sorted(set(rels)):
+        parts = rel.split('/')
+        if os.path.exists(os.path.join(out_dir, *parts)) or os.path.isdir(os.path.join(work_dir, *parts)):
+            continue
+        bk, gm = os.path.join(orig_dir, *parts), os.path.join(game_dir, *parts)
+        if os.path.exists(bk) and os.path.exists(gm) and fingerprint(bk) != fingerprint(gm):
+            dst = os.path.join(out_dir, *parts)
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(bk, dst)
+            done.append(rel)
+    return done
+
+
 def load_doc(root, source):
     dst = path_for(root, source)
     return json.load(open(dst, encoding='utf-8')) if os.path.exists(dst) else None

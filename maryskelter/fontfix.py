@@ -13,12 +13,11 @@ compileheart/fontfix.py (алгоритм один на всі ігри руші
 2 рази, лише в англійському оригіналі).
 """
 from compileheart import fontfix as _fix
-from compileheart.scheme import SlotScheme
+from . import chars
 
-# українська літера -> латинський слот, у який ми малюємо її гліф
-SLOT = {'і': 'ì', 'І': 'Ì', 'ї': 'ò', 'Ї': 'Ò',
-        'є': 'ù', 'Є': 'Ù', 'ґ': 'ã', 'Ґ': 'Ã'}
-SCHEME = SlotScheme(SLOT)
+# українська літера -> латинський слот, у який ми малюємо її гліф (дані — maryskelter/chars.py)
+SLOT = chars.SUBST
+SCHEME = chars.SCHEME      # одна схема на гру: і шрифт, і текст
 PROFILE = {'bearings': (1, 2), 'pad_right': True, 'crop_first': True,
            'yi': 'diaeresis', 'ghe': (5, 9), 'slant': 0}
 

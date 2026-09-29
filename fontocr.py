@@ -193,8 +193,8 @@ EXTRA = '…«»《》♪☆一・“”’—♡∵'
 
 def charset(font):
     """Символи, для яких у шрифті є гліф (українські, ASCII, уживані знаки)."""
-    from neptunia import chars
-    want = chars.UPPER + chars.LOWER + ''.join(chr(c) for c in range(0x21, 0x7f)) + EXTRA
+    from compileheart.fontfix import LOWER, UPPER          # українська абетка — спільна для всіх ігор
+    want = UPPER + LOWER + ''.join(chr(c) for c in range(0x21, 0x7f)) + EXTRA
     return [c for c in dict.fromkeys(want) if font.glyph(c)]
 
 
