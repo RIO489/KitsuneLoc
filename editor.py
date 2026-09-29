@@ -96,17 +96,6 @@ def full_redraw(win):
         pass
 
 
-# японські символи: розділові 、。「」…, кана, ієрогліфи, повноширинні знаки й літери (ＳＬＧ),
-# півширинна катакана; пробіл повної ширини U+3000 — ні
-_JA_CHAR = re.compile('[、-〿぀-ヿㇰ-ㇿ㐀-䶿一-鿿'
-                      '豈-﫿！-ﾟ]')
-
-
-def ja_count(s):
-    """Скільки японських символів у тексті — без пробілів, переносів і кодів гри."""
-    return len(_JA_CHAR.findall(s or ''))
-
-
 def chars_word(n):
     """«1 знак», «3 знаки», «5 знаків»."""
     if n % 10 == 1 and n % 100 != 11:
@@ -671,7 +660,12 @@ class Editor(tk.Toplevel):
         st = self.pr.stats(rows)
         w = f'{st["words_done"]:,} з {st["words"]:,}'.replace(',', ' ')
         pc = f' ({100 * st["words_done"] // st["words"]}%)' if st['words'] else ''
-        self.count.set(f'рядків: {len(rows)} · перекладено: {done} · слів перекладено: {w}{pc}')
+        ja = ''
+        if st['ja']:                     # японський оригінал є — обсяг ще й у японських знаках
+            n = lambda v: f'{v:,}'.replace(',', ' ')
+            ja = (f' · японською: {n(st["ja"])} знаків, з них перекладено {n(st["ja_done"])} '
+                  f'({100 * st["ja_done"] // st["ja"]}%)')
+        self.count.set(f'рядків: {len(rows)} · перекладено: {done} · слів перекладено: {w}{pc}{ja}')
 
     FIRST_CHUNK, CHUNK = 400, 2500
 
@@ -788,7 +782,7 @@ class Editor(tk.Toplevel):
             self._set_text(self.src_text, e['src'])
             if e.get('ja'):
                 self._set_text(self.ja_text, e['ja'])
-                self.ja_head.set(f'Японська · {chars_word(ja_count(e["ja"]))} (без пробілів)')
+                self.ja_head.set(f'Японська · {chars_word(project.ja_count(e["ja"]))} (без пробілів)')
                 if not getattr(self, '_ja_shown', False):
                     self.ja_lbl.pack(anchor='w', pady=(4, 0), after=self.src_grip)
                     self.ja_text.pack(fill='x', after=self.ja_lbl)

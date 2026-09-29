@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.2.1'
+VERSION = '2.2.2'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1173,6 +1173,11 @@ class App(tk.Tk):
             wp = 100 * pr['words_done'] / pr['words']
             self.say(f'Слів (в оригіналі): перекладено {pr["words_done"]:,} з {pr["words"]:,} '
                      f'({wp:.1f}%). Рядки «не перекладати» не рахуються.'.replace(',', ' '), 'mono')
+        if pr.get('ja'):                     # японський оригінал: знаки без пробілів
+            jp = 100 * pr['ja_done'] / pr['ja']
+            n = lambda v: f'{v:,}'.replace(',', ' ')
+            self.say(f'Японською (знаки без пробілів): {n(pr["ja"])} знаків, з них перекладено '
+                     f'{n(pr["ja_done"])} ({jp:.1f}%).', 'mono')
         self._remember_pc(pr['done'], pr['total'])
         pc = 100 * pr['done'] / pr['total'] if pr['total'] else 0
         self.set_status(f'Перекладено {pr["done"]}/{pr["total"]} ({pc:.1f}%).')

@@ -27,6 +27,16 @@ import sheets
 STORE = 'переклад.json'
 _CODES = re.compile(r'#[A-Za-z]+(?:\[[^\]]*\])?|%[-+0#]*\d*(?:\.\d+)?(?:ll|l|h)?[a-zA-Z%]|<[A-Z]+>|\{[^}]*\}')
 _WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
+
+# японські символи: розділові 、。「」…, кана, ієрогліфи, повноширинні знаки й літери (ＳＬＧ),
+# півширинна катакана; пробіл повної ширини U+3000 — ні
+_JA_CHAR = re.compile('[\u3001-\u303f\u3040-\u30ff\u31f0-\u31ff\u3400-\u4dbf\u4e00-\u9fff'
+                      '\uf900-\ufaff\uff01-\uff9f]')
+
+
+def ja_count(s):
+    """Скільки японських символів у тексті — без пробілів, переносів і кодів гри."""
+    return len(_JA_CHAR.findall(s or ''))
 SNAPSHOT = '_excel_знімок.json'     # у work\<гра>: що було в книгах на час вивантаження
 VERSION = 1
 
@@ -305,17 +315,26 @@ class Project:
             n = r['_words'] = len(_WORD.findall(_CODES.sub(' ', r['e']['src'])))
         return n
 
+    @staticmethod
+    def ja_chars(r):
+        """Японських символів в японському оригіналі рядка (без пробілів) — обсяг перекладу з японської."""
+        n = r.get('_ja')
+        if n is None:
+            n = r['_ja'] = ja_count(r['e'].get('ja'))
+        return n
+
     def stats(self, rows):
         """{'rows', 'done', 'words', 'words_done'} для набору рядків (лише ті, що рахуються)."""
         rows = [r for r in rows if self.counted(r)]
         done = [r for r in rows if r['e'].get('tr')]
         return {'rows': len(rows), 'done': len(done),
-                'words': sum(map(self.words, rows)), 'words_done': sum(map(self.words, done))}
+                'words': sum(map(self.words, rows)), 'words_done': sum(map(self.words, done)),
+                'ja': sum(map(self.ja_chars, rows)), 'ja_done': sum(map(self.ja_chars, done))}
 
     def progress(self):
         """Як sheets.progress: по «книгах» (імена — кожне один раз; службові ключі не рахуються)."""
         books = []
-        done = total = words = words_done = 0
+        done = total = words = words_done = ja = ja_done = 0
         for name, scenes in self.books().items():
             # порожній оригінал (коротка назва) і «не перекладати» — у відсоток не йдуть
             st = self.stats([r for rs in scenes.values() for r in rs])
@@ -327,8 +346,10 @@ class Project:
             total += st['rows']
             words += st['words']
             words_done += st['words_done']
+            ja += st['ja']
+            ja_done += st['ja_done']
         return {'books': books, 'done': done, 'total': total, 'auto': 0, 'prev': None,
-                'words': words, 'words_done': words_done}
+                'words': words, 'words_done': words_done, 'ja': ja, 'ja_done': ja_done}
 
     # ------------------------------------------------------------ зберігання
     def save(self):
