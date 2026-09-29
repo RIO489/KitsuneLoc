@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.5'
+VERSION = '2.6'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -287,6 +287,10 @@ class App(tk.Tk):
         self.b_editor = ttk.Button(ed, text='Редактор перекладу…', command=self.open_editor,
                                    style='Accent.TButton')
         self.b_editor.pack(side='left')
+        # нагадування перекладача (reminders.py): знімки з «Гра на екрані» та ін.
+        self.b_remind = ttk.Button(ed, text='Нагадування…', command=self.open_reminders)
+        self.b_remind.pack(side='left', padx=8)
+        self.reminders_win = None
         self.editor_hint = ttk.Label(ed, text='', style='Hint.TLabel')
         self.editor_hint.pack(side='left', padx=10)
         self.editor_win = None
@@ -469,6 +473,9 @@ class App(tk.Tk):
         self.path_var.set(self.settings.get(self.game.get(), ''))
         if hasattr(self, 'textures'):
             self.textures.set(self._textures_on())
+        w = getattr(self, 'reminders_win', None)
+        if w is not None and w.winfo_exists():              # нагадування — іншої гри
+            w.reload(self._xl_now(), GAMES[self.game.get()]['title'])
         if hasattr(self, 'slot_frame'):
             for w in self.slot_frame.winfo_children():
                 w.state(['!disabled'] if self.game.get() == 'crystar' else ['disabled'])
@@ -1398,6 +1405,32 @@ class App(tk.Tk):
                                 'Спочатку натисни «1. Дістати текст з гри».')
             return
         self._open_path(os.path.join(xl, name))
+
+    def _xl_now(self):
+        """Тека перекладу гри, вибраної вгорі (не лише під час дії)."""
+        return os.path.join(XLSX, GAMES[self.game.get()]['folder'])
+
+    def open_reminders(self):
+        """Вікно «Нагадування» (reminders_window.py) — для гри, вибраної вгорі."""
+        w = self.reminders_win
+        if w is not None and w.winfo_exists():
+            w.reload(self._xl_now(), GAMES[self.game.get()]['title'])
+            w.lift()
+            return
+        try:
+            import importlib, reminders, reminders_window
+            importlib.reload(reminders)
+            importlib.reload(reminders_window)
+            self.reminders_win = reminders_window.RemindersWindow(self, self._xl_now(),
+                                                                  GAMES[self.game.get()]['title'])
+        except Exception as e:
+            messagebox.showerror('Нагадування', str(e))
+
+    def reminders_changed(self):
+        """Додано нагадування з іншого вікна — оновити відкрите вікно нагадувань."""
+        w = self.reminders_win
+        if w is not None and w.winfo_exists():
+            w.reload()
 
     def open_terms(self):
         """Глосарій гри й «як уже перекладено в книгах» (terms_window.py)."""

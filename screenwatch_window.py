@@ -9,8 +9,14 @@
 Подвійний клік — рядок у редакторі. «Редактор іде за грою» — редактор сам
 переходить до знайденої репліки (без фокусу: гра лишається попереду; поки ти
 пишеш у редакторі — не заважає). «Поверх усіх вікон» — маленьке вікно над грою.
+
+Журнал зі знімками: до кожного рядка журналу — знімок кадру, на якому його побачено
+(тимчасова тека `кеш\\знімки журналу\\<гра>\\<сеанс>`; знімок рядка, що випав із журналу,
+видаляється одразу, решта — з «Очистити» чи закриттям вікна). Клік по рядку — знімок
+із рамкою навколо цього тексту замість живого кадру («Наживо» — назад). Права кнопка —
+«Зберегти в нагадування» (reminders.py: знімок і рядок лишаються, доки їх не видалять).
 """
-import os, queue, threading, time
+import os, queue, shutil, threading, time
 import tkinter as tk
 from tkinter import ttk
 
@@ -43,6 +49,9 @@ class WatchWindow(tk.Toplevel):
         self.photo = None
         self.rows = {}                  # ключ -> iid у списку
         self.frames = 0
+        self.shots = {}                 # ключ рядка журналу -> {файл, рамка, стан, текст, хто, час}
+        self.shot_dir = None            # тимчасова тека знімків цього вікна (створюється з першим)
+        self.pinned = None              # ключ, чий знімок зараз показано замість живого кадру
         self._build()
         self.protocol('WM_DELETE_WINDOW', self._close)
         try:
@@ -73,8 +82,12 @@ class WatchWindow(tk.Toplevel):
                         command=self._keep_frames).pack(side='right', padx=8)
 
         self.status = tk.StringVar()
-        ttk.Label(self, textvariable=self.status, style='Hint.TLabel', padding=(10, 0),
-                  wraplength=580, justify='left').pack(fill='x')
+        sf = ttk.Frame(self, padding=(10, 0))
+        sf.pack(fill='x')
+        # «Наживо» — видно лише, поки показано знімок з журналу
+        self.b_live = ttk.Button(sf, text='Наживо', command=self._unpin)
+        ttk.Label(sf, textvariable=self.status, style='Hint.TLabel',
+                  wraplength=500, justify='left').pack(side='left', fill='x', expand=True)
 
         c = self.app.colors()
         self.canvas = tk.Canvas(self, height=THUMB_W * 9 // 16, highlightthickness=0, bd=0,
@@ -96,6 +109,8 @@ class WatchWindow(tk.Toplevel):
         self.list.pack(fill='both', expand=True)
         self.list.bind('<Double-1>', lambda e: self._open())
         self.list.bind('<Return>', lambda e: self._open())
+        self.list.bind('<<TreeviewSelect>>', lambda e: self._show_shot())
+        self.list.bind('<Button-3>', self._menu)
 
     # ------------------------------------------------------------ пошук
     def _rebuild(self, start):
@@ -201,9 +216,18 @@ class WatchWindow(tk.Toplevel):
             if key is None:
                 continue
             shown.append((ratio, key, self._state(key, kind), box, text))
-        self._draw(img, shown)
+        self.last = (img, shown)
+        if not self.pinned:
+            self._draw(img, shown)
+        shot = self._save_shot(img) if shown else None
         for ratio, key, st, box, text in shown:
-            self._remember(key, st, text)
+            rk = self._remember(key, st, text)
+            if shot and rk in self.rows:
+                _st, who, shown_text = self.list.item(self.rows[rk], 'values')
+                self.shots[rk] = {'файл': shot, 'рамка': [int(v) for v in box], 'стан': st,
+                                  'текст': shown_text, 'хто': who, 'ключ': key,
+                                  'час': time.strftime('%H:%M:%S')}
+        self._prune_shots()
         known = [s for s in shown if s[1]]
         n_old = len(shown) - len(known)
         n_stale = sum(1 for s in known if s[2] in ('stale', 'warn'))
@@ -213,7 +237,8 @@ class WatchWindow(tk.Toplevel):
             msg += f'; {n_stale} — у грі ще не твій переклад (натисни «2»)'
         if n_old:
             msg += f'; ще {n_old} — текст, якого програма не знає'
-        self.status.set(msg + '.')
+        if not self.pinned:                       # поки видно знімок — підпис знімка не перетираємо
+            self.status.set(msg + '.')
         if self.follow.get() and known:
             self._follow(known)
 
@@ -240,13 +265,13 @@ class WatchWindow(tk.Toplevel):
             return 'warn'
         return 'ok' if tr else 'miss'
 
-    def _draw(self, img, shown):
+    def _draw(self, img, shown, width=2):
         k = THUMB_W / img.width
         im = img.resize((THUMB_W, max(1, round(img.height * k))), Image.BILINEAR)
         d = ImageDraw.Draw(im)
         for _r, _key, st, box, _t in shown:
             d.rectangle([box[0] * k - 2, box[1] * k - 2, box[2] * k + 2, box[3] * k + 2],
-                        outline=STATES[st][1], width=2)
+                        outline=STATES[st][1], width=width)
         self.photo = ImageTk.PhotoImage(im)
         self.canvas.configure(height=im.height)
         self.canvas.delete('all')
@@ -278,6 +303,7 @@ class WatchWindow(tk.Toplevel):
         for old in kids[HISTORY:]:
             self.list.delete(old)
         self.rows = {k: i for k, i in self.rows.items() if self.list.exists(i)}
+        return key
 
     def _follow(self, shown):
         """Редактор — до найпевнішої довгої репліки кадру (без фокусу). Поки фокус у
@@ -314,8 +340,11 @@ class WatchWindow(tk.Toplevel):
             self.ed.goto(key)
 
     def _clear(self):
+        self._unpin()
         self.list.delete(*self.list.get_children())
         self.rows.clear()
+        self.shots.clear()
+        self._prune_shots()
 
     def _close(self):
         if self.watcher:
@@ -323,4 +352,111 @@ class WatchWindow(tk.Toplevel):
             self.watcher = None
         if getattr(self.ed, 'watch_win', None) is self:
             self.ed.watch_win = None
+        if self.shot_dir:
+            shutil.rmtree(self.shot_dir, ignore_errors=True)
         self.destroy()
+
+    # ------------------------------------------------------------ знімки журналу
+    def shots_root(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(here, 'кеш', 'знімки журналу', self.pr.game)
+
+    def _save_shot(self, img):
+        """Кадр — у тимчасову теку сеансу (JPEG). Повертає шлях або None."""
+        try:
+            if self.shot_dir is None:
+                root = self.shots_root()
+                # теки попередніх сеансів (вікно закрили аварійно) — прибрати
+                if os.path.isdir(root):
+                    for d in os.listdir(root):
+                        shutil.rmtree(os.path.join(root, d), ignore_errors=True)
+                self.shot_dir = os.path.join(root, time.strftime('%Y%m%d-%H%M%S'))
+                os.makedirs(self.shot_dir, exist_ok=True)
+            path = os.path.join(self.shot_dir, f'{self.frames:06d}.jpg')
+            img.convert('RGB').save(path, quality=85)
+            return path
+        except OSError:
+            return None
+
+    def _prune_shots(self):
+        """Знімки лише для рядків, що є в журналі; решту — з диска."""
+        self.shots = {k: s for k, s in self.shots.items() if k in self.rows}
+        if self.pinned and self.pinned not in self.shots:
+            self._unpin()
+        if not self.shot_dir or not os.path.isdir(self.shot_dir):
+            return
+        keep = {os.path.basename(s['файл']) for s in self.shots.values()}
+        for f in os.listdir(self.shot_dir):
+            if f not in keep:
+                try:
+                    os.remove(os.path.join(self.shot_dir, f))
+                except OSError:
+                    pass
+
+    def _selected_key(self):
+        s = self.list.selection()
+        return next((k for k, i in self.rows.items() if s and i == s[0]), None)
+
+    def _show_shot(self):
+        """Клік по рядку журналу — його знімок з рамкою навколо тексту."""
+        key = self._selected_key()
+        if key is None:
+            return
+        shot = self.shots.get(key)
+        if not shot or not os.path.exists(shot['файл']):
+            self.status.set('Для цього рядка знімка немає (побачено до того, як з\'явились знімки).')
+            return
+        try:
+            img = Image.open(shot['файл'])
+            img.load()
+        except OSError:
+            return
+        self.pinned = key
+        self._draw(img, [(1.0, key, shot['стан'], shot['рамка'], shot['текст'])], width=4)
+        self.b_live.pack(side='right', padx=(6, 0))
+        self.status.set(f'Знімок з журналу ({shot["час"]}): «{shot["текст"][:80]}». '
+                        'Права кнопка — зберегти в нагадування; «Наживо» — назад до гри.')
+
+    def _unpin(self):
+        if not self.pinned:
+            return
+        self.pinned = None
+        self.b_live.pack_forget()
+        sel = self.list.selection()
+        if sel:
+            self.list.selection_remove(*sel)
+        last = getattr(self, 'last', None)
+        if last:
+            self._draw(*last)
+
+    def _menu(self, ev):
+        iid = self.list.identify_row(ev.y)
+        if not iid:
+            return
+        self.list.selection_set(iid)
+        key = self._selected_key()
+        m = tk.Menu(self, tearoff=False)
+        m.add_command(label='Зберегти в нагадування', command=lambda: self._to_reminders(key))
+        if key and not key.startswith('ocr:'):
+            m.add_command(label='Відкрити рядок у редакторі', command=self._open)
+        m.tk_popup(ev.x_root, ev.y_root)
+
+    def _to_reminders(self, key):
+        """Рядок журналу (зі знімком, якщо є) — у «Нагадування» → «Збережений журнал екрану гри»."""
+        import reminders
+        iid = self.rows.get(key)
+        if iid is None or not self.list.exists(iid):
+            return
+        st_label, who, text = self.list.item(iid, 'values')
+        shot = self.shots.get(key) or {}
+        try:
+            store = reminders.Store(self.pr.xl)
+            store.add('екран', text, image=shot.get('файл'), стан=st_label, хто=who or None,
+                      ключ=None if key.startswith('ocr:') else key, рамка=shot.get('рамка'))
+        except OSError as ex:
+            self.status.set(f'Не вдалося зберегти нагадування: {ex}')
+            return
+        self.status.set('Збережено в «Нагадування» (головне вікно програми → «Нагадування…»).')
+        notify = getattr(self.app, 'reminders_changed', None)
+        if notify:
+            notify()
