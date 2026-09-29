@@ -9,7 +9,7 @@
 
 Дані — project.py (Переклад\\<гра>\\переклад.json); зберігається само.
 """
-import os, queue, sys, threading
+import os, queue, re, sys, threading
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, font as tkfont
 
@@ -94,6 +94,26 @@ def full_redraw(win):
         u32.RedrawWindow(h, None, None, 0x1 | 0x4 | 0x80 | 0x100)
     except Exception:
         pass
+
+
+# японські символи: розділові 、。「」…, кана, ієрогліфи, повноширинні знаки й літери (ＳＬＧ),
+# півширинна катакана; пробіл повної ширини U+3000 — ні
+_JA_CHAR = re.compile('[、-〿぀-ヿㇰ-ㇿ㐀-䶿一-鿿'
+                      '豈-﫿！-ﾟ]')
+
+
+def ja_count(s):
+    """Скільки японських символів у тексті — без пробілів, переносів і кодів гри."""
+    return len(_JA_CHAR.findall(s or ''))
+
+
+def chars_word(n):
+    """«1 знак», «3 знаки», «5 знаків»."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f'{n} знак'
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f'{n} знаки'
+    return f'{n} знаків'
 
 
 def one_line(s, n=200):
@@ -252,13 +272,16 @@ class Editor(tk.Toplevel):
         ttk.Label(right, text='Оригінал').pack(anchor='w', pady=(6, 0))
         self.src_text = self._text(right, 4, readonly=True)
         self.src_grip = self._grip(right, 'src', self.src_text)
-        self.ja_lbl = ttk.Label(right, text='Японська')
+        self.ja_head = tk.StringVar(value='Японська')
+        self.ja_lbl = ttk.Label(right, textvariable=self.ja_head)
         self.ja_text = self._text(right, 2, readonly=True, pack=False)
         self.ja_grip = self._grip(right, 'ja', self.ja_text, pack=False)
 
         tl = ttk.Frame(right)
         tl.pack(fill='x', pady=(6, 0))
         ttk.Label(tl, text='Переклад').pack(side='left')
+        self.tr_count = tk.StringVar()          # довжина перекладу — порівняти з японською
+        ttk.Label(tl, textvariable=self.tr_count, style='Hint.TLabel').pack(side='left', padx=(6, 0))
         ttk.Label(tl, text='Enter — далі · Shift+Enter — новий рядок · Ctrl+↑/↓ — сусідній рядок',
                   style='Hint.TLabel').pack(side='right')
         self.tr_text = self._text(right, 5)
@@ -753,6 +776,7 @@ class Editor(tk.Toplevel):
                 self.note.set('')
                 self.warn.set('')
                 self.link_info.set('')
+                self.tr_count.set('')
                 self.b_link.pack_forget()
                 return
             r = self.pr.by_key[k]
@@ -764,6 +788,7 @@ class Editor(tk.Toplevel):
             self._set_text(self.src_text, e['src'])
             if e.get('ja'):
                 self._set_text(self.ja_text, e['ja'])
+                self.ja_head.set(f'Японська · {chars_word(ja_count(e["ja"]))} (без пробілів)')
                 if not getattr(self, '_ja_shown', False):
                     self.ja_lbl.pack(anchor='w', pady=(4, 0), after=self.src_grip)
                     self.ja_text.pack(fill='x', after=self.ja_lbl)
@@ -786,6 +811,7 @@ class Editor(tk.Toplevel):
             self._fill_terms()
         finally:
             self._loading = False
+        self._count_tr()
         self._later('preview', 80, self._preview)
         self.after_idle(self._fit_all)                   # після розкладки: переноси вже відомі
 
@@ -873,7 +899,14 @@ class Editor(tk.Toplevel):
             return
         self._later('commit', COMMIT_DELAY, self._commit)
         self._later('preview', 300, self._preview)
+        self._count_tr()
         self._fit_text(self.tr_text, *self.FIT['tr'], 'tr')   # поле росте разом із перекладом
+
+    def _count_tr(self):
+        """Скільки знаків у перекладі без пробілів і переносів (поруч з японською — для порівняння)."""
+        t = self.tr_text.get('1.0', 'end-1c')
+        n = sum(1 for ch in t if not ch.isspace())
+        self.tr_count.set(f'· {chars_word(n)} без пробілів' if n else '')
 
     def _enter(self, _e):
         return self._step(1)
