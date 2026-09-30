@@ -97,6 +97,7 @@ class TermsWindow(tk.Toplevel):
         ttk.Button(btns, text='Видалити', command=self._delete).pack(side='left', padx=6)
         ttk.Button(btns, text='Очистити поля', command=self._clear).pack(side='left')
         ttk.Button(btns, text='Додати імена з книг', command=self._import_names).pack(side='right')
+        ttk.Button(btns, text='Забрати з Crowdin…', command=self._import_crowdin).pack(side='right', padx=6)
 
         # --- як перекладено в книгах
         right = ttk.Frame(body, padding=(10, 0, 0, 0))
@@ -260,6 +261,44 @@ class TermsWindow(tk.Toplevel):
             self.status.set(f'Додано імен: {added}')
         elif not added:
             self.status.set('Нових перекладених імен немає.')
+
+    def _import_crowdin(self):
+        """Глосарій, вивантажений з Crowdin (.tbx / .csv / .xlsx; можна кілька файлів —
+        варіанти перекладу об'єднуються), — у свої терміни."""
+        from tkinter import filedialog
+        paths = filedialog.askopenfilenames(
+            parent=self, title='Глосарій Crowdin (можна вибрати кілька файлів)',
+            filetypes=[('Глосарій Crowdin', '*.tbx *.csv *.xlsx'), ('Усі файли', '*.*')])
+        if not paths:
+            return
+        try:
+            got = glossary.read_many(paths)
+        except Exception as ex:                      # битий файл, не той формат
+            messagebox.showerror('Crowdin', f'Не вдалося прочитати глосарій:\n{ex}', parent=self)
+            return
+        if not got:
+            messagebox.showinfo('Crowdin', 'У файлі немає термінів з перекладом.', parent=self)
+            return
+        _t, added, same, diff = glossary.merge(self.terms, got)
+        replace = False
+        if diff:
+            show = '\n'.join(f'{en}: {mine} → {new}' for en, mine, new in diff[:12])
+            more = f'\n… і ще {len(diff) - 12}' if len(diff) > 12 else ''
+            ans = messagebox.askyesnocancel(
+                'Crowdin', f'{len(diff)} термінів у глосарії вже є, але з іншим перекладом '
+                f'(свій → з Crowdin):\n\n{show}{more}\n\nЗамінити їх перекладом з Crowdin?\n'
+                '«Так» — замінити, «Ні» — лишити свої, «Скасувати» — нічого не додавати.', parent=self)
+            if ans is None:
+                return
+            replace = ans
+        terms, added, same, diff = glossary.merge(self.terms, got, replace=replace)
+        self.terms = terms
+        if (added or (replace and diff)) and not self._store():
+            return
+        msg = f'З Crowdin: нових термінів {added}, уже були такі самі {same}'
+        if diff:
+            msg += f', з іншим перекладом {len(diff)} ({"замінено" if replace else "лишено свої"})'
+        self.status.set(msg + '.')
 
     # -------------------------------------------------------- як перекладено
     def _load_corpus(self):

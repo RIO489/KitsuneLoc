@@ -82,6 +82,145 @@ def save(xlsx_dir, terms):
     os.replace(p + '.tmp', p)
 
 
+# ------------------------------------------------ глосарії інших програм (Crowdin)
+# Crowdin вивантажує глосарій у TBX (v2 «martif» і v3 «tbx»), CSV і XLSX з колонками
+# «Term [en]» / «Term [uk]». Кілька варіантів перекладу (синоніми) зберігає лише TBX v3 —
+# CSV/XLSX лишають один, тому можна дати кілька файлів: варіанти об'єднуються.
+
+SRC_LANG, DST_LANG = 'en', 'uk'
+_LATIN = re.compile('[A-Za-z]')
+
+
+def _lang(e):
+    for k, v in e.attrib.items():
+        if k.endswith('}lang') or k == 'lang':
+            return v.split('-')[0].lower()
+    return ''
+
+
+def _read_tbx(path):
+    import xml.etree.ElementTree as ET
+    out = []
+    for entry in ET.parse(path).getroot().iter():
+        if entry.tag.split('}')[-1] not in ('termEntry', 'conceptEntry'):
+            continue
+        terms, notes = {}, []
+        for x in entry.iter():
+            tag = x.tag.split('}')[-1]
+            if tag in ('langSet', 'langSec'):
+                lang = _lang(x)
+                for sec in x:
+                    if sec.tag.split('}')[-1] not in ('tig', 'termSec', 'ntig'):
+                        continue
+                    t = next((y.text for y in sec.iter() if y.tag.split('}')[-1] == 'term'), None)
+                    pref = any('preferred' in (y.text or '') for y in sec.iter()
+                               if y.tag.split('}')[-1] == 'termNote')
+                    if t and t.strip():
+                        lst = terms.setdefault(lang, [])
+                        lst.insert(0, t.strip()) if pref else lst.append(t.strip())
+            elif tag == 'descrip' and x.get('type') in ('context', 'definition') and (x.text or '').strip():
+                notes.append(x.text.strip())
+        out.append((terms.get(SRC_LANG, []), terms.get(DST_LANG, []), '; '.join(dict.fromkeys(notes))))
+    return out
+
+
+def _read_table(rows):
+    """Рядки таблиці (перший — заголовки) з колонками Crowdin «Term [en]», «Term [uk]»,
+    «Description [..]» / «Note [..]»."""
+    rows = iter(rows)
+    head = [str(h or '').strip() for h in next(rows, [])]
+    col = {h.lower(): i for i, h in enumerate(head)}
+    src, dst = col.get(f'term [{SRC_LANG}]'), col.get(f'term [{DST_LANG}]')
+    if src is None or dst is None:
+        raise ValueError('немає колонок «Term [en]» і «Term [uk]» — це не глосарій Crowdin')
+    note_cols = [i for h, i in col.items() if h.split(' [')[0] in ('description', 'note', 'concept definition',
+                                                                     'concept note')]
+    out = []
+    for r in rows:
+        cell = lambda i: str(r[i]).strip() if i < len(r) and r[i] is not None else ''
+        notes = [cell(i) for i in note_cols if cell(i)]
+        out.append(([cell(src)] if cell(src) else [], [cell(dst)] if cell(dst) else [],
+                    '; '.join(dict.fromkeys(notes))))
+    return out
+
+
+def read_external(path):
+    """Глосарій Crowdin (.tbx / .csv / .xlsx) -> [{"en", "ua", "примітка"}]. Кілька варіантів
+    перекладу — через «/», як у своєму глосарії. Записи без перекладу чи без латиниці в
+    англійському (кирилиця, вписана не в ту колонку) пропускаються."""
+    ext = os.path.splitext(path)[1].lower()
+    if ext == '.tbx':
+        raw = _read_tbx(path)
+    elif ext == '.csv':
+        import csv
+        with open(path, encoding='utf-8-sig', newline='') as f:
+            raw = _read_table(list(csv.reader(f)))
+    elif ext in ('.xlsx', '.xlsm'):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True)
+        try:
+            raw = _read_table(list(wb.worksheets[0].iter_rows(values_only=True)))
+        finally:
+            wb.close()
+    else:
+        raise ValueError(f'невідомий формат {ext or "без розширення"} (потрібен .tbx, .csv або .xlsx)')
+    got = {}
+    for srcs, dsts, note in raw:
+        for en in srcs:
+            if not dsts or not _LATIN.search(en):
+                continue
+            t = got.setdefault(en.lower(), {'en': en, 'ua': [], 'примітка': []})
+            t['ua'] += [v for v in dsts if v not in t['ua']]
+            if note and note not in t['примітка']:
+                t['примітка'].append(note)
+    return [{'en': t['en'], 'ua': '/'.join(t['ua']), 'примітка': '; '.join(t['примітка'])}
+            for t in got.values()]
+
+
+def read_many(paths):
+    """Кілька файлів глосарію (усі формати, що дав Crowdin) -> один список. Для кожного
+    терміна першим іде файл, де в нього найбільше варіантів: лише TBX v3 має всі варіанти
+    й порядок (бажаний переклад — перший), решта лишає один, і не завжди бажаний."""
+    per = [t for p in paths for t in read_external(p)]
+    per.sort(key=lambda t: -len(t['ua'].split('/')))          # стабільно: порядок файлів лишається
+    got = {}
+    for t in per:
+        g = got.setdefault(t['en'].lower(), {'en': t['en'], 'ua': [], 'примітка': []})
+        g['ua'] += [v for v in t['ua'].split('/') if v and v not in g['ua']]
+        if t['примітка'] and t['примітка'] not in g['примітка']:
+            g['примітка'].append(t['примітка'])
+    return [{'en': g['en'], 'ua': '/'.join(g['ua']), 'примітка': '; '.join(g['примітка'])}
+            for g in got.values()]
+
+
+def merge(own, incoming, replace=False):
+    """Додати терміни до своїх. -> (новий список, додано, однакових, [(en, свій, новий)] різних).
+    Різні лишаються своїми, якщо не replace (тоді беремо новий переклад, а свою примітку —
+    якщо в новому її немає). Терміни бази жанру (`жанр`) не свої: новий їх перекриває."""
+    terms = [dict(t) for t in own if not t.get('жанр')]
+    idx = {t['en'].lower(): t for t in terms}
+    added, same, diff = 0, 0, []
+    for t in incoming:
+        mine = idx.get(t['en'].lower())
+        if mine is None:
+            t = {k: v for k, v in t.items() if v}
+            terms.append(t)
+            idx[t['en'].lower()] = t
+            added += 1
+        elif not mine.get('ua'):
+            mine['ua'] = t['ua']
+            added += 1
+        elif mine['ua'] == t['ua']:
+            same += 1
+        else:
+            diff.append((mine['en'], mine.get('ua') or '', t['ua']))
+            if replace:
+                mine['ua'] = t['ua']
+                if t.get('примітка'):
+                    mine['примітка'] = t['примітка']
+    return terms, added, same, diff
+
+
 _rx = {}
 
 
