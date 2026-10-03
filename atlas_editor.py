@@ -936,11 +936,8 @@ class Editor(tk.Toplevel):
 
 
 def app_colors(app):
-    import importlib
-    mod = importlib.import_module('__main__')
-    themes = getattr(mod, 'THEMES', None) or {'light': {'bg': '#f5f5f5', 'dim': '#6a6a6a',
-                                                        'warn': '#8a6100'}}
-    return themes.get(getattr(app, 'theme', 'light'), next(iter(themes.values())))
+    import themes
+    return themes.get(getattr(app, 'theme', themes.DEFAULT))
 
 
 class FontGallery(tk.Toplevel):

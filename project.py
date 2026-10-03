@@ -4,7 +4,9 @@
 Джерело правди — один файл `Переклад\\<гра>\\переклад.json` (тека перекладача,
 поруч із книгами):
     {"версія": 1,
-     "рядки": {"<source>\\t<id>": {"tr": "...", "note": "...", "окремо": true}},
+     "рядки": {"<source>\\t<id>": {"tr": "...", "note": "...", "окремо": true,
+                                   "mt": {"t": "...", "рушій": "claude", "час": "...", "src": "<md5>"},
+                                   "вичитано": "<md5 перекладу>"}},
      "групи": [{"назва": "Розділ 1 — Сцена 1", "рядки": ["<source>\\t<id>", ...]}],
      "excel": "2026-09-26 12:00"}      # коли востаннє вивантажували / читали книги
 Зберігаються лише рядки, де щось є. Робочі JSON у `work\\` — дзеркало: після
@@ -15,11 +17,16 @@
 мовця, службовий ключ) «пов'язані» — переклад одного йде в усі. Позначка
 "окремо" відв'язує рядок: у нього свій переклад.
 
+Рівні перекладу (з 3.0): машинний (`mt`, чернетка від сервісу перекладу — у гру
+сам не йде, «Взяти в переклад» переносить його в `tr`) → переклад (`tr`) →
+вичитано (md5 перекладу на час позначки: діє, доки переклад той самий). Машинний
+прив'язаний до оригіналу (md5 `src`): оригінал змінився — машинний застарів.
+
 Групи — як у Crowdin: довільні назви, рядок може бути в кількох групах,
 сам текст нікуди не переноситься. Поруч — автоматичне дерево «за файлами
 гри» (розкладка колишніх книг, sheets.DEFAULT_BOOKS).
 """
-import collections, datetime, json, os, re
+import collections, datetime, hashlib, json, os, re
 
 import common as locfile
 import sheets
@@ -54,6 +61,11 @@ def enabled(xl_dir):
 
 def now():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M')
+
+
+def text_hash(s):
+    """Короткий відбиток тексту: оригіналу (для машинного) чи перекладу (для «вичитано»)."""
+    return hashlib.md5((s or '').encode('utf-8')).hexdigest()[:12]
 
 
 class Project:
@@ -111,6 +123,24 @@ class Project:
             e.pop('auto', None)             # «перевір» з книг тут не потрібне
             r['окремо'] = bool(got.get('окремо'))
             r['лишити'] = bool(got.get('лишити'))
+            if isinstance(got.get('mt'), dict) and got['mt'].get('t'):
+                r['mt'] = got['mt']
+            if got.get('вичитано'):
+                r['вичитано'] = got['вичитано']
+            if self._mirror_mt(r):
+                self.dirty.add(r['source'])
+
+    def _mirror_mt(self, r):
+        """Машинний (лише свіжий) — і в work\\ (e['mt']): звідти його бере колонка Excel.
+        У гру він не йде: імпорт читає лише tr. Повертає, чи змінилось."""
+        e, t = r['e'], self.mt(r)
+        if (e.get('mt') or '') == t:
+            return False
+        if t:
+            e['mt'] = t
+        else:
+            e.pop('mt', None)
+        return True
 
     # ------------------------------------------------------------ рядки
     def tr(self, k):
@@ -190,6 +220,68 @@ class Project:
             e.pop('note', None)
         self.dirty.add(self.by_key[k]['source'])
         return True
+
+    # ------------------------------------------------------------ рівні перекладу (з 3.0)
+    @staticmethod
+    def mt(r):
+        """Машинний переклад рядка, якщо він зроблений саме з цього оригіналу; інакше ''."""
+        m = r.get('mt')
+        if not m or m.get('src') != text_hash(r['e']['src']):
+            return ''
+        return m.get('t', '')
+
+    @staticmethod
+    def mt_stale(r):
+        """Машинний є, але оригінал відтоді змінився (оновлення гри)."""
+        m = r.get('mt')
+        return bool(m) and m.get('src') != text_hash(r['e']['src'])
+
+    def set_mt(self, k, text, engine):
+        """Машинний переклад — у рядок і в усі з тим самим оригіналом (і відв'язані:
+        машинний залежить лише від оригіналу). Переклад (tr) не чіпає. -> змінені ключі."""
+        text = (text or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+        changed = []
+        for x in self.twins(k):
+            r = self.by_key[x]
+            if text:
+                r['mt'] = {'t': text, 'рушій': engine, 'час': now(), 'src': text_hash(r['e']['src'])}
+            elif r.pop('mt', None) is None:
+                continue
+            if self._mirror_mt(r):
+                self.dirty.add(r['source'])
+            changed.append(x)
+        if changed:
+            self._touched = True
+        return changed
+
+    def take_mt(self, k):
+        """«Взяти в переклад»: машинний -> переклад (і в пов'язані). -> змінені ключі."""
+        t = self.mt(self.by_key[k])
+        return self.set_tr(k, t) if t else []
+
+    @staticmethod
+    def reviewed(r):
+        """Переклад вичитано — і відтоді не змінювали."""
+        tr = r['e'].get('tr')
+        return bool(tr) and r.get('вичитано') == text_hash(tr)
+
+    def set_reviewed(self, keys, on):
+        """Позначити «вичитано» (лише рядки з перекладом) — разом із пов'язаними однаковими,
+        у них той самий переклад. -> змінені ключі."""
+        changed = []
+        for k in keys:
+            for x in self.linked(k):
+                r = self.by_key[x]
+                if on and not r['e'].get('tr') or self.reviewed(r) == on:
+                    continue
+                if on:
+                    r['вичитано'] = text_hash(r['e']['tr'])
+                else:
+                    r.pop('вичитано', None)
+                changed.append(x)
+        if changed:
+            self._touched = True
+        return changed
 
     def detach(self, keys):
         for k in keys:
@@ -442,7 +534,12 @@ class Project:
                 seen.add(u)
                 uniq.append(r)
         udone = [r for r in uniq if r['e'].get('tr')]
+        # рівні (з 3.0): «лише машинний» — перекладу ще немає, а чернетка є; «вичитано»
+        only_mt = lambda rs: sum(1 for r in rs if not r['e'].get('tr') and self.mt(r))
+        rev = lambda rs: sum(1 for r in rs if self.reviewed(r))
         return {'rows': len(rows), 'done': len(done),
+                'mt': only_mt(rows), 'reviewed': rev(done),
+                'uniq_mt': only_mt(uniq), 'uniq_reviewed': rev(udone),
                 'words': sum(map(self.words, rows)), 'words_done': sum(map(self.words, done)),
                 'ja': sum(map(self.ja_chars, rows)), 'ja_done': sum(map(self.ja_chars, done)),
                 'uniq': len(uniq), 'uniq_done': len(udone),
@@ -477,7 +574,7 @@ class Project:
     def progress(self):
         """Як sheets.progress: по «книгах» (імена — кожне один раз; службові ключі не рахуються)."""
         books = []
-        done = total = words = words_done = ja = ja_done = 0
+        done = total = words = words_done = ja = ja_done = mt = reviewed = 0
         everything = []
         for name, scenes in self.books().items():
             # порожній оригінал (коротка назва) і «не перекладати» — у відсоток не йдуть
@@ -487,8 +584,11 @@ class Project:
             if not st['rows']:
                 continue
             books.append({'book': name, 'done': st['done'], 'total': st['rows'], 'auto': 0,
-                          'words': st['words'], 'words_done': st['words_done']})
+                          'words': st['words'], 'words_done': st['words_done'],
+                          'mt': st['mt'], 'reviewed': st['reviewed']})
             done += st['done']
+            mt += st['mt']
+            reviewed += st['reviewed']
             total += st['rows']
             words += st['words']
             words_done += st['words_done']
@@ -498,6 +598,7 @@ class Project:
         st = self.stats(everything)
         return {'books': books, 'done': done, 'total': total, 'auto': 0, 'prev': None,
                 'words': words, 'words_done': words_done, 'ja': ja, 'ja_done': ja_done,
+                'mt': mt, 'reviewed': reviewed,
                 'uniq': {k[5:]: v for k, v in st.items() if k.startswith('uniq_')} | {
                     'rows': st['uniq'], 'done': st['uniq_done']},
                 'hidden': self.hidden(everything)}
@@ -517,6 +618,10 @@ class Project:
                 d['окремо'] = True
             if r.get('лишити'):
                 d['лишити'] = True
+            if r.get('mt'):
+                d['mt'] = r['mt']
+            if self.reviewed(r):            # переклад змінили після позначки — позначка зникає
+                d['вичитано'] = r['вичитано']
             if d:
                 rows[k] = d
         st = dict(self.meta)
@@ -541,6 +646,31 @@ class Project:
 
     def pending(self):
         return bool(self.dirty) or getattr(self, '_touched', False)
+
+    # ------------------------------------------------------------ машинний у гру (пробний прохід)
+    def lend_mt(self):
+        """Галочка «Підставити машинний, де немає перекладу»: лише в work\\ (з нього збирає
+        «2»), у переклад.json — ні. Окремий екземпляр проєкту: редактор, відкритий під час
+        «2», не побачить і не збереже чернетку як переклад. Повертає (рядків, source-и);
+        повернути як було — return_mt(source-и)."""
+        tmp = Project(self.game, self.work, self.xl)
+        n = 0
+        for r in tmp.rows:
+            if r['kind'] == 'key' or r.get('лишити') or r['e'].get('tr'):
+                continue
+            t = tmp.mt(r)
+            if t:
+                r['e']['tr'] = t
+                tmp.dirty.add(r['source'])
+                n += 1
+        sources = sorted(tmp.dirty)
+        tmp.sync_work()
+        return n, sources
+
+    def return_mt(self, sources):
+        """Після «2»: у work\\ знову справжній переклад (з цього проєкту)."""
+        self.dirty.update(s for s in sources if s in self.docs)
+        self.sync_work()
 
     # ------------------------------------------------------------ перехід з книг
     def relink(self):

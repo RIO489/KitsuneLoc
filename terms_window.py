@@ -357,7 +357,5 @@ class TermsWindow(tk.Toplevel):
 
 
 def _colors(app):
-    import importlib
-    mod = importlib.import_module('__main__')
-    themes = getattr(mod, 'THEMES', None) or {'light': {'bg': '#fafafa'}}
-    return themes.get(getattr(app, 'theme', 'light'), next(iter(themes.values())))
+    import themes
+    return themes.get(getattr(app, 'theme', themes.DEFAULT))

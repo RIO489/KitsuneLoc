@@ -21,16 +21,14 @@ SAVE_DELAY = 1500           # мс після останньої правки �
 COMMIT_DELAY = 250          # мс після набору — переклад іде в рядок (і в однакові)
 PREVIEW_W = 560             # ширина прев'ю в панелі, px
 COUNT_MODES = {'all': '⇄ Усе', 'uniq': '⇄ Без повторів', 'hidden': '⇄ Приховане'}
-FILTERS = ('Усі', 'Неперекладені', 'Перекладені', 'Відв\'язані', 'З приміткою', 'Не перекладати')
+FILTERS = ('Усі', 'Неперекладені', 'Перекладені', 'Відв\'язані', 'З приміткою', 'Не перекладати',
+           'Лише машинний', 'Переклад ≠ машинний', 'Вичитані', 'Не вичитані')
+KEY_M = 77                  # клавіша M (keycode Windows) — Ctrl+M за будь-якої розкладки
 
 
 def colors(app):
-    import importlib
-    mod = importlib.import_module('__main__')
-    themes = getattr(mod, 'THEMES', None) or {'light': dict(bg='#fafafa', fg='#1c1c1c', panel='#ffffff',
-                                                            dim='#6a6a6a', warn='#8a6100', ok='#0a6b2e',
-                                                            accent='#005fb8', link='#005fb8')}
-    return themes.get(getattr(app, 'theme', 'light'), next(iter(themes.values())))
+    import themes
+    return themes.get(getattr(app, 'theme', themes.DEFAULT))
 
 
 def no_full_redraw(win):
@@ -158,8 +156,13 @@ class Editor(tk.Toplevel):
         st.configure('Ed.Treeview', background=c.get('panel', '#ffffff'),
                      fieldbackground=c.get('panel', '#ffffff'), foreground=c.get('fg', '#1a1a1a'),
                      rowheight=24)
-        st.map('Ed.Treeview', background=[('selected', c.get('accent', '#1f4f82'))],
+        st.map('Ed.Treeview', background=[('selected', c.get('sel', c.get('accent', '#1f4f82')))],
                foreground=[('selected', '#ffffff')])
+        # теми з прикрасами (themes.py): небо у відступах, світні рамки навколо панелей
+        import themes
+        self.deco = themes.Deco(self, getattr(self.app, 'theme', 'light'))
+        self.deco.frame(self.content)
+        dpad = self._dpad = 9 if self.deco.on else 0
 
         top = ttk.Frame(self.content, padding=(10, 8, 10, 4))
         top.pack(fill='x')
@@ -176,6 +179,7 @@ class Editor(tk.Toplevel):
             mb['menu'] = m
             mb.pack(side='right')
         ttk.Button(top, text='Терміни…', command=self._terms_window).pack(side='right', padx=6)
+        ttk.Button(top, text='Машинний переклад…', command=self._mt_window).pack(side='right', padx=(6, 0))
         ttk.Button(top, text='Гра на екрані…', command=self._watch_window).pack(side='right')
         ttk.Label(top, text='Пошук:').pack(side='left')
         self.q_var = tk.StringVar()
@@ -194,7 +198,7 @@ class Editor(tk.Toplevel):
         self.bind('<Shift-F3>', lambda e: self._hit(-1))
         ttk.Label(top, text='Показати:').pack(side='left', padx=(10, 4))
         self.flt = tk.StringVar(value=FILTERS[0])
-        cb = ttk.Combobox(top, textvariable=self.flt, values=FILTERS, state='readonly', width=16)
+        cb = ttk.Combobox(top, textvariable=self.flt, values=FILTERS, state='readonly', width=20)
         cb.pack(side='left')
         cb.bind('<<ComboboxSelected>>', lambda e: self._refill())
         # службові ключі гри (IDS_…, шляхи до моделей) не перекладають — у списку їх немає;
@@ -205,7 +209,8 @@ class Editor(tk.Toplevel):
         body.pack(fill='both', expand=True, padx=10, pady=4)
 
         # --- дерево груп ------------------------------------------------
-        left = ttk.Frame(body)
+        left = ttk.Frame(body, padding=dpad)
+        self.deco.frame(left, glow=True)
         tf = ttk.Frame(left)
         tf.pack(side='top', fill='both', expand=True)
         self.tree = ttk.Treeview(tf, show='tree', columns=('pc',), selectmode='browse',
@@ -223,7 +228,8 @@ class Editor(tk.Toplevel):
         body.add(left, weight=0)
 
         # --- рядки --------------------------------------------------------
-        mid = ttk.Frame(body)
+        mid = ttk.Frame(body, padding=dpad)
+        self.deco.frame(mid, glow=True)
         self.list = ttk.Treeview(mid, columns=('n', 'st', 'who', 'src', 'tr'), show='headings',
                                  selectmode='extended', style='Ed.Treeview')
         for col, text, w, stretch in (('n', '№', 44, False), ('st', '', 44, False),
@@ -238,6 +244,7 @@ class Editor(tk.Toplevel):
         self.list.tag_configure('todo', foreground=c['dim'])
         self.list.tag_configure('solo', foreground=c.get('warn', '#8a6100'))
         self.list.tag_configure('keep', foreground=c['dim'], font=('Segoe UI', 9, 'italic'))
+        self.list.tag_configure('mt', foreground=c['dim'], font=('Segoe UI', 9, 'italic'))
         self.list.bind('<<TreeviewSelect>>', lambda e: self._row_selected())
         self.list.bind('<Button-3>', self._list_menu)
         self.list.bind('<Return>', lambda e: (self.tr_text.focus_set(), 'break')[1])
@@ -247,7 +254,8 @@ class Editor(tk.Toplevel):
         # --- панель рядка -------------------------------------------------
         # панель прокручується: довгий оригінал + японська + переклад бувають вищі за екран
         # (у перекладача низ панелі з полем перекладу ховався за краєм вікна)
-        outer = ttk.Frame(body)
+        outer = ttk.Frame(body, padding=dpad)
+        self.deco.frame(outer, glow=True)
         body.add(outer, weight=0)
         self.rcanvas = tk.Canvas(outer, bg=c['bg'], highlightthickness=0, borderwidth=0)
         self.rscroll = ttk.Scrollbar(outer, orient='vertical', command=self.rcanvas.yview)
@@ -261,11 +269,23 @@ class Editor(tk.Toplevel):
         self.bind_all('<MouseWheel>', self._wheel, add='+')
         self.heights = dict(getattr(self.app, 'settings', {}).get('editor_heights') or {})
         self._right_w = 0
+        # шапка: назва рядка й де він; у темах з прикрасами праворуч — персонаж гри (з кешу чібі)
+        hdr = ttk.Frame(right)
+        hdr.pack(fill='x')
+        self.portrait = None
+        if self.deco.on and self.deco.deco.get('portrait'):
+            im = themes.portrait(self.game, 120)
+            if im is not None:
+                from PIL import ImageTk
+                self.portrait = ImageTk.PhotoImage(themes.on_color(im, c['bg']))
+                tk.Label(hdr, image=self.portrait, bd=0, bg=c['bg']).pack(side='right', anchor='ne')
+        hl = ttk.Frame(hdr)
+        hl.pack(side='left', fill='x', expand=True, anchor='n')
         self.head = tk.StringVar()
-        ttk.Label(right, textvariable=self.head, font=('Segoe UI', 11, 'bold')).pack(anchor='w')
+        ttk.Label(hl, textvariable=self.head, font=('Segoe UI', 11, 'bold')).pack(anchor='w')
         self.where = tk.StringVar()
-        self.where_lbl = ttk.Label(right, textvariable=self.where, style='Hint.TLabel',
-                                   wraplength=PREVIEW_W, justify='left')
+        self.where_lbl = ttk.Label(hl, textvariable=self.where, style='Hint.TLabel',
+                                   wraplength=PREVIEW_W - (130 if self.portrait else 0), justify='left')
         self.where_lbl.pack(anchor='w')
 
         ttk.Label(right, text='Оригінал').pack(anchor='w', pady=(6, 0))
@@ -291,7 +311,28 @@ class Editor(tk.Toplevel):
         self.tr_text.bind('<Alt-Return>', self._newline)
         self.tr_text.bind('<Control-Down>', lambda e: self._step(1))
         self.tr_text.bind('<Control-Up>', lambda e: self._step(-1))
-        self._grip(right, 'tr', self.tr_text)
+        self.tr_grip = self._grip(right, 'tr', self.tr_text)
+        # рівні перекладу (з 3.0): «вичитано» — діє, доки переклад той самий
+        rv = self.rev_row = ttk.Frame(right)
+        rv.pack(fill='x', pady=(2, 0))
+        self.rev_var = tk.BooleanVar(value=False)
+        self.b_rev = ttk.Checkbutton(rv, text='Вичитано (F8)', variable=self.rev_var,
+                                     command=lambda: self._set_reviewed(self.rev_var.get()))
+        self.b_rev.pack(side='left')
+        self.bind('<F8>', lambda e: (self._set_reviewed(not self.rev_var.get()), 'break')[1])
+        # машинний переклад — чернетка: показ + «Взяти в переклад»; у гру сам не йде
+        self.mt_box = ttk.Frame(right)
+        mh = ttk.Frame(self.mt_box)
+        mh.pack(fill='x', pady=(6, 0))
+        self.mt_head = tk.StringVar()
+        ttk.Label(mh, textvariable=self.mt_head).pack(side='left')
+        self.b_clear_mt = ttk.Button(mh, text='Прибрати', command=self._clear_mt_cur)
+        self.b_clear_mt.pack(side='right')
+        self.b_take_mt = ttk.Button(mh, text='Взяти в переклад (Ctrl+M)', command=self._take_mt)
+        self.b_take_mt.pack(side='right', padx=(0, 6))
+        self.mt_text = self._text(self.mt_box, 2, readonly=True)
+        self._mt_shown = False
+        self.bind('<Control-KeyPress>', self._ctrl_key, add='+')
         self.bind('<Control-f>', lambda e: (self.search.focus_set(), 'break')[1])
         self.bind('<Control-h>', lambda e: (self._replace_all(), 'break')[1])
         # права кнопка в полях: виділений фрагмент -> «Замінити всюди» (tkkeys.kl_menu)
@@ -408,8 +449,9 @@ class Editor(tk.Toplevel):
         """Початкові ширини: дерево ~280 px, панель рядка ~620 px, решта — список."""
         try:
             w = self.body.winfo_width()
-            self.body.sashpos(0, 280)
-            self.body.sashpos(1, max(700, w - 640))
+            p = 2 * self._dpad                   # відступи світних рамок теми (themes.Deco)
+            self.body.sashpos(0, 280 + p)
+            self.body.sashpos(1, max(700 + p, w - 640 - p))
         except tk.TclError:
             pass
 
@@ -447,7 +489,7 @@ class Editor(tk.Toplevel):
         self._right_w = w
         wrap = max(200, w - 24)
         self.warn_lbl.configure(wraplength=wrap)
-        self.where_lbl.configure(wraplength=wrap)
+        self.where_lbl.configure(wraplength=max(150, wrap - (self.portrait.width() + 10 if self.portrait else 0)))
         self._later('preview', 200, self._preview)
         self._later('fit_text', 150, self._fit_all)      # інша ширина — інші переноси
 
@@ -523,7 +565,7 @@ class Editor(tk.Toplevel):
 
     # висота полів під текст (рядків на екрані, з переносами за шириною панелі):
     # (найменше, найбільше) — довше прокручується, щоб не витіснити решту панелі
-    FIT = {'src': (2, 12), 'ja': (1, 14), 'tr': (3, 12)}
+    FIT = {'src': (2, 12), 'ja': (1, 14), 'tr': (3, 12), 'mt': (1, 8)}
 
     def _fit_text(self, t, lo, hi, name=None):
         if name and name in self.heights:               # висоту задано ручкою під полем
@@ -549,6 +591,8 @@ class Editor(tk.Toplevel):
         if getattr(self, '_ja_shown', False):
             self._fit_text(self.ja_text, *self.FIT['ja'], 'ja')
         self._fit_text(self.tr_text, *self.FIT['tr'], 'tr')
+        if self._mt_shown:
+            self._fit_text(self.mt_text, *self.FIT['mt'])
 
     @staticmethod
     def _set_text(t, s):
@@ -716,6 +760,15 @@ class Editor(tk.Toplevel):
             rows = [r for r in rows if r['e'].get('note')]
         elif f == 'Не перекладати':
             rows = [r for r in rows if r.get('лишити')]
+        elif f == 'Лише машинний':          # чернетка є, перекладу ще немає
+            rows = [r for r in rows if not r['e'].get('tr') and self.pr.mt(r) and not r.get('лишити')]
+        elif f == 'Переклад ≠ машинний':    # що людина виправила в чернетці
+            rows = [r for r in rows if r['e'].get('tr') and self.pr.mt(r)
+                    and r['e']['tr'] != self.pr.mt(r)]
+        elif f == 'Вичитані':
+            rows = [r for r in rows if self.pr.reviewed(r)]
+        elif f == 'Не вичитані':            # перекладені, але ще не вичитані
+            rows = [r for r in rows if r['e'].get('tr') and not self.pr.reviewed(r)]
         q = self.q_var.get().strip().lower()
         if q:
             rows = [r for r in rows if q in r['e']['src'].lower()
@@ -752,6 +805,11 @@ class Editor(tk.Toplevel):
             self.count.set('не рахуються — ' + ('; '.join(parts) if parts else 'немає'))
             return
         st = self.pr.stats(rows)
+        p = 'uniq_' if self.count_mode == 'uniq' else ''
+        # рівні (з 3.0): згадуються, лише коли вже є
+        lv = ''.join(f' · {lab}: {n(st[p + key])}' for key, lab in (('reviewed', 'вичитано'),
+                                                                     ('mt', 'лише машинний'))
+                     if st[p + key])
         if self.count_mode == 'uniq':
             ja = ''
             if st['uniq_ja']:
@@ -759,7 +817,7 @@ class Editor(tk.Toplevel):
                       + pc(st['uniq_ja_done'], st['uniq_ja']))
             self.count.set(f'без повторів: рядків {n(st["uniq"])} (з {n(st["rows"])}) · перекладено: '
                            f'{n(st["uniq_done"])} · слів перекладено: {n(st["uniq_words_done"])} з '
-                           f'{n(st["uniq_words"])}' + pc(st['uniq_words_done'], st['uniq_words']) + ja)
+                           f'{n(st["uniq_words"])}' + pc(st['uniq_words_done'], st['uniq_words']) + lv + ja)
             return
         done = sum(1 for r in rows if r['e'].get('tr'))
         w = f'{n(st["words_done"])} з {n(st["words"])}'
@@ -768,7 +826,7 @@ class Editor(tk.Toplevel):
             ja = (f' · японською: {n(st["ja"])} знаків, з них перекладено {n(st["ja_done"])}'
                   + pc(st['ja_done'], st['ja']))
         self.count.set(f'рядків: {len(rows)} · перекладено: {done} · слів перекладено: {w}'
-                       + pc(st['words_done'], st['words']) + ja)
+                       + pc(st['words_done'], st['words']) + lv + ja)
 
     def _count_next(self):
         modes = list(COUNT_MODES)
@@ -796,15 +854,23 @@ class Editor(tk.Toplevel):
     def _values(self, r, i):
         twins = len(self.pr.twins(r['k']))
         st = '⊘' if r.get('лишити') else '✂' if r.get('окремо') else (f'×{twins}' if twins > 1 else '')
+        tr = r['e'].get('tr', '')
+        if self.pr.reviewed(r):
+            st = '✓' + st
+        elif not tr and self.pr.mt(r):
+            st = '≈' + st
+            tr = '≈ ' + self.pr.mt(r)            # чернетка — сірим курсивом, щоб не сплутати
         who = 'ім\'я' if r['kind'] == 'name' else ('ключ' if r['kind'] == 'key' else self.pr.speaker(r))
-        return (i, st, who, one_line(r['e']['src']), one_line(r['e'].get('tr', '')))
+        return (i, st, who, one_line(r['e']['src']), one_line(tr))
 
     def _tags(self, r):
         if r.get('лишити'):
             return ('keep',)
         if r.get('окремо'):
             return ('solo',)
-        return () if r['e'].get('tr') else ('todo',)
+        if r['e'].get('tr'):
+            return ()
+        return ('mt',) if self.pr.mt(r) else ('todo',)
 
     def _update_rows(self, keys):
         """Оновити в списку рядки, чий переклад змінився (однакові теж)."""
@@ -922,6 +988,7 @@ class Editor(tk.Toplevel):
                 self.b_link.pack_forget()
                 self.b_places.pack_forget()
                 self.b_atlas.pack_forget()
+                self._levels_state()
                 return
             r = self.pr.by_key[k]
             e = r['e']
@@ -951,6 +1018,7 @@ class Editor(tk.Toplevel):
                 self.tr_text.edit_modified(False)
                 self._text_for = k          # для якого рядка зараз текст у полі (див. _commit)
             self.note.set(e.get('note', ''))
+            self._levels_state()
             self._link_state()
             if self.pr.docs[r['source']][1].get('format') == 'atlas':
                 self.b_atlas.pack(side='right', padx=(0, 6))
@@ -967,6 +1035,87 @@ class Editor(tk.Toplevel):
         self._hit_info()
         self._later('preview', 80, self._preview)
         self.after_idle(self._fit_all)                   # після розкладки: переноси вже відомі
+
+    # ============================================================ рівні перекладу (з 3.0)
+    def _levels_state(self):
+        """Галочка «Вичитано» і блок «Машинний» — за вибраним рядком."""
+        r = self.pr.by_key.get(self.cur) if self.cur else None
+        self.rev_var.set(bool(r) and self.pr.reviewed(r))
+        self.b_rev.configure(state='normal' if r and r['e'].get('tr') else 'disabled')
+        mt = self.pr.mt(r) if r else ''
+        stale = bool(r) and self.pr.mt_stale(r)
+        # блок видно завжди (і порожнім): перекладач має знати, де з'явиться чернетка
+        m = (r or {}).get('mt') or {}
+        if mt:
+            self.mt_head.set(f'Машинний · {m.get("рушій", "?")} · {m.get("час", "")}')
+        elif stale:
+            self.mt_head.set(f'Машинний застарів: оригінал змінився ({m.get("рушій", "?")}, {m.get("час", "")})')
+        else:
+            self.mt_head.set('Машинний — ще немає')
+        self.b_take_mt.configure(state='normal' if mt else 'disabled')
+        self.b_clear_mt.configure(state='normal' if m else 'disabled')
+        self._set_text(self.mt_text, m.get('t', ''))
+        if not self._mt_shown:
+            self.mt_box.pack(fill='x', after=self.rev_row)
+            self._mt_shown = True
+
+    def _ctrl_key(self, ev):
+        if ev.keycode == KEY_M:              # за keycode: в українській розкладці keysym інший
+            self._take_mt()
+            return 'break'
+
+    def _take_mt(self):
+        """Машинний — у поле перекладу (як «схожі»: Ctrl+Z повертає, далі — звичайне збереження)."""
+        r = self.pr.by_key.get(self.cur) if self.cur else None
+        t = self.pr.mt(r) if r else ''
+        if not t:
+            return
+        self.tr_text.edit_separator()
+        self.tr_text.delete('1.0', 'end')
+        self.tr_text.insert('1.0', t)
+        self.tr_text.edit_separator()
+        self.tr_text.focus_set()
+        self.tr_text.mark_set('insert', 'end-1c')
+        self.status.set('Взято машинний переклад — вичитай і виправ (Ctrl+Z — повернути як було).')
+
+    def _clear_mt_cur(self):
+        if self.cur:
+            self._clear_mt([self.cur])
+
+    def _clear_mt(self, keys):
+        changed = []
+        for k in keys:
+            changed += self.pr.set_mt(k, '', '')
+        self._after_levels(changed, f'Машинний переклад прибрано: {len(changed)} рядків.')
+
+    def _take_mt_keys(self, keys):
+        """Масово з меню: машинний -> переклад лише там, де перекладу ще немає."""
+        self._commit()
+        changed = []
+        for k in keys:
+            if not self.pr.tr(k):
+                changed += self.pr.take_mt(k)
+        self._after_bulk(changed, 'Машинний узято в переклад (вичитай їх)')
+
+    def _set_reviewed(self, on, keys=None):
+        self._commit()
+        keys = keys or ([self.cur] if self.cur else [])
+        if not keys:
+            return
+        changed = self.pr.set_reviewed(keys, on)
+        self._levels_state()
+        if on and not changed and not any(self.pr.tr(k) for k in keys):
+            self.status.set('Перекладу ще немає — вичитувати нічого.')
+            return
+        self._after_levels(changed, f'{"Вичитано" if on else "Знято «вичитано»"}: {len(changed)} рядків.')
+
+    def _after_levels(self, changed, msg):
+        self._update_rows(changed)
+        self._levels_state()
+        self._count(self.view)
+        self.status.set(msg)
+        if changed:
+            self._later('save', SAVE_DELAY, self._save)
 
     def _link_state(self):
         k = self.cur
@@ -1445,6 +1594,7 @@ class Editor(tk.Toplevel):
             self.status.set(f'Переклад записано{f" (разом з однаковими: {n})" if n > 1 else ""} — '
                             'зберігаю…')
             self._checks()
+            self._levels_state()            # «вичитано» знімається, щойно переклад змінили
             self._later('save', SAVE_DELAY, self._save)
 
     def _note_changed(self):
@@ -1812,6 +1962,19 @@ class Editor(tk.Toplevel):
         m.add_command(label='Відв\'язати від однакових', command=lambda: self._detach(keys))
         m.add_command(label='Прив\'язати до однакових', command=lambda: self._attach(keys))
         m.add_separator()
+        rs = [self.pr.by_key[k] for k in keys]
+        m.add_command(label=f'Машинний переклад вибраних ({len(keys)})…', command=lambda: self._mt_window(keys))
+        n_mt = sum(1 for r in rs if not r['e'].get('tr') and self.pr.mt(r))
+        if n_mt:
+            m.add_command(label=f'Взяти машинний у переклад ({n_mt})', command=lambda: self._take_mt_keys(keys))
+        if any(r.get('mt') for r in rs):
+            m.add_command(label='Прибрати машинний', command=lambda: self._clear_mt(keys))
+        if any(r['e'].get('tr') for r in rs):
+            if all(self.pr.reviewed(r) for r in rs if r['e'].get('tr')):
+                m.add_command(label='Зняти «вичитано»', command=lambda: self._set_reviewed(False, keys))
+            else:
+                m.add_command(label='Позначити вичитаним  (F8)', command=lambda: self._set_reviewed(True, keys))
+        m.add_separator()
         m.add_command(label='Вставити з буфера в переклад', command=lambda: self._paste(keys))
         m.add_command(label='Скопіювати оригінал у переклад', command=lambda: self._copy_src(keys))
         m.add_command(label='Очистити переклад', command=lambda: self._clear(keys))
@@ -2131,6 +2294,16 @@ class Editor(tk.Toplevel):
         threading.Thread(target=job, daemon=True).start()
 
     # ============================================================ інше
+    def _mt_window(self, keys=None):
+        """Машинний переклад (mt_window): чернетки сервісу — у поле «Машинний» рядків."""
+        import mt_window
+        self._commit()
+        old = getattr(self, '_mt_win', None)
+        if old is not None and old.winfo_exists():
+            old.lift()
+            return
+        self._mt_win = mt_window.MTWindow(self, keys)
+
     def _terms_window(self):
         self.app.open_terms()
 

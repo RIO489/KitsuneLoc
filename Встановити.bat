@@ -3,6 +3,8 @@ rem Only ASCII in this file: cmd.exe misreads UTF-8 Cyrillic in .bat files.
 echo Installing required libraries...
 python -m pip install --upgrade pip
 python -m pip install openpyxl UnityPy Pillow texture2ddecoder etcpak sv-ttk fonttools numpy
+rem anthropic 1.x is needed for machine translation (Claude); an old 0.x lacks newer API options
+python -m pip install --upgrade anthropic
 echo.
 if errorlevel 1 (
   echo Something went wrong. The most common reason is that Python is not installed,

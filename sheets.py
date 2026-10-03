@@ -55,15 +55,19 @@ PIC_H = 32                           # мінімальна висота ряд�
 
 
 COL_TERMS = 'Терміни'                # з глосарію (glossary.py): які терміни є в рядку
+COL_MT = 'Машинний'                  # чернетка сервісу перекладу (project.py, з 3.0) — лише показ,
+                                     # при читанні книги перекладом не вважається
 
 
-def columns(game, has_ja=None, has_pic=False, has_terms=False):
+def columns(game, has_ja=None, has_pic=False, has_terms=False, has_mt=False):
     cols = [(COL_SRC, 0), (COL_ID, 0), (COL_STATE, 17), ('Сцена', 16), ('Хто / ключ', 16),
             ('Оригінал (EN)', 55)]
     if has_pic:
         cols.append((COL_PIC, 38))
     if has_ja if has_ja is not None else game == 'crystar':
         cols.append(('Японська', 45))
+    if has_mt:
+        cols.append((COL_MT, 50))
     cols.append((COL_TR, 60))
     if has_terms:
         cols.append((COL_TERMS, 30))
@@ -286,7 +290,8 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
     has_pic = any(e.get('preview') for _s, es in book for e in es)
     import glossary
     has_terms = bool(terms) and names_only is None
-    cols = columns(game, has_ja, has_pic, has_terms)
+    has_mt = names_only is None and any(e.get('mt') for _s, es in book for e in es)
+    cols = columns(game, has_ja, has_pic, has_terms, has_mt)
     with_ja = any(c == 'Японська' for c, _w in cols)
     L = {c: get_column_letter(k + 1) for k, (c, _w) in enumerate(cols)}
     idx = {c: k for k, (c, _w) in enumerate(cols)}
@@ -301,7 +306,7 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
                 if e.get('tr') and e['src']:
                     memory.setdefault(e['src'], e['tr'])
 
-    WRAP_COLS = [idx[c] for c in ('Оригінал (EN)', COL_TR, COL_TERMS, COL_NOTE, COL_HINT) if c in idx]
+    WRAP_COLS = [idx[c] for c in ('Оригінал (EN)', COL_MT, COL_TR, COL_TERMS, COL_NOTE, COL_HINT) if c in idx]
     if 'Японська' in idx:
         WRAP_COLS.append(idx['Японська'])
     rowno = {}                      # свій лічильник: ws.max_row перебирає всі клітинки
@@ -324,6 +329,8 @@ def write_book(path, game, book, autofill=True, tagdict=None, names_only=None, h
             row.append('')                  # картинку кладемо окремо, поверх клітинки
         if with_ja:
             row.append(ja)
+        if has_mt:
+            row.append(e.get('mt', ''))
         row.append(tr)
         if has_terms:
             row.append(glossary.hint(src, terms))

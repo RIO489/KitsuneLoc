@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.13'
+VERSION = '3.0'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -48,16 +48,10 @@ GAMES = {
 }
 
 # ---------------------------------------------------------------- теми вікна
-# Кольори підігнані під тему Sun Valley (sv-ttk, вигляд Windows 11); без неї
-# вікно малюється старою ручною темою з тими самими кольорами.
-THEMES = {
-    'light': dict(bg='#fafafa', fg='#1c1c1c', panel='#ffffff', logbg='#ffffff',
-                  logfg='#1c1c1c', dim='#6a6a6a', err='#b00020', warn='#8a6100',
-                  ok='#0a6b2e', accent='#005fb8', link='#005fb8'),
-    'dark':  dict(bg='#1c1c1c', fg='#e6e6e6', panel='#2b2b2b', logbg='#202020',
-                  logfg='#dfe3e6', dim='#8b949e', err='#ff7b72', warn='#e3b341',
-                  ok='#56d364', accent='#57c8ff', link='#57c8ff'),
-}
+# Теми — themes.py (з 3.0): «Світла»/«Темна» — Sun Valley (sv-ttk), решта — свої кольори
+# на clam і прикраси. THEMES тут — для вікон, що беруть кольори з __main__ (editor.colors).
+from themes import THEMES                                               # noqa: E402
+import themes                                                           # noqa: E402
 
 SOUNDS = os.path.join(HERE, 'звуки')
 
@@ -259,6 +253,11 @@ class App(tk.Tk):
         self.textures = tk.BooleanVar(value=self._textures_on())
         ttk.Checkbutton(tf, text='Заливати в гру написи на картинках (текстури) і свої картинки',
                         variable=self.textures, command=self._save_textures).pack(side='left')
+        # машинний переклад (чернетка, з 3.0) — у гру лише для пробного проходу; окремо для гри
+        mf = ttk.Frame(gf); mf.pack(fill='x', padx=10, pady=2)
+        self.mt_game = tk.BooleanVar(value=self._mt_in_game())
+        ttk.Checkbutton(mf, text='Підставляти машинний переклад, де ще немає свого (пробний прохід)',
+                        variable=self.mt_game, command=self._save_mt_game).pack(side='left')
 
         pf = ttk.Frame(gf); pf.pack(fill='x', padx=10, pady=(2, 10))
         ttk.Label(pf, text='Тека гри:').pack(side='left')
@@ -332,8 +331,12 @@ class App(tk.Tk):
         self.b_report.pack(side='left', padx=8)
         self.b_copy = ttk.Button(row, text='Скопіювати лог', command=self.copy_log)
         self.b_copy.pack(side='right')
-        self.b_theme = ttk.Button(row, text='Темна тема', command=self._toggle_theme)
+        self.theme_var = tk.StringVar(value=themes.get(self.theme)['title'])
+        self.b_theme = ttk.Combobox(row, textvariable=self.theme_var, state='readonly', width=15,
+                                    values=[themes.get(n)['title'] for n in themes.names()])
+        self.b_theme.bind('<<ComboboxSelected>>', lambda e: self._set_theme(themes.by_title(self.theme_var.get())))
         self.b_theme.pack(side='right', padx=8)
+        ttk.Label(row, text='Тема:').pack(side='right')
         self.sound = tk.BooleanVar(value=self.settings.get('sound', True))
         ttk.Checkbutton(row, text='Звуки', variable=self.sound,
                         command=self._save_sound).pack(side='right', padx=(0, 4))
@@ -368,6 +371,7 @@ class App(tk.Tk):
         self.log.pack(side='left', fill='both', expand=True)
         self.links = {}                          # тег у лозі -> (гра, source, id, оригінал, …)
         self.links_shown = {}                    # тег -> чи показано як затверджене
+        self.deco_rings = [gf, wf, ef, lf]       # світні рамки навколо розділів (themes.Deco)
 
     def _step_button(self, parent, text, hint, cmd, accent=False):
         box = ttk.Frame(parent); box.pack(side='left', padx=(0, 10))
@@ -379,35 +383,20 @@ class App(tk.Tk):
         return b
 
     def _apply_theme(self):
-        c = THEMES[self.theme]
-        st = ttk.Style()
-        try:
-            import sv_ttk
-        except ImportError:
-            sv_ttk = None
-        if sv_ttk is not None:
-            sv_ttk.set_theme(self.theme)
-        else:
-            try:
-                st.theme_use('clam' if self.theme == 'dark' else
-                             ('vista' if 'vista' in st.theme_names() else 'clam'))
-            except tk.TclError:
-                pass
-        dark_titlebar(self, self.theme == 'dark')
+        if self.theme not in THEMES:
+            self.theme = themes.DEFAULT
+        c = themes.apply(self, self.theme)
+        dark_titlebar(self, themes.is_dark(self.theme))
         self.configure(bg=c['bg'])
-        if sv_ttk is None and self.theme == 'dark':
-            st.configure('.', background=c['bg'], foreground=c['fg'],
-                         fieldbackground=c['panel'], bordercolor='#3a4048')
-            st.configure('TLabelframe', background=c['bg'], bordercolor='#3a4048')
-            st.configure('TLabelframe.Label', background=c['bg'], foreground=c['dim'])
-            st.configure('TButton', background=c['panel'], foreground=c['fg'])
-            st.map('TButton', background=[('active', '#39414a'), ('disabled', c['bg'])],
-                   foreground=[('disabled', c['dim'])])
-            st.configure('TEntry', fieldbackground=c['panel'], foreground=c['fg'])
-            st.configure('TCombobox', fieldbackground=c['panel'], foreground=c['fg'])
-            st.configure('TProgressbar', background=c['accent'], troughcolor=c['panel'])
-        st.configure('Hint.TLabel', foreground=c['dim'], font=('Segoe UI', 8))
-        self.b_theme.configure(text='Світла тема' if self.theme == 'dark' else 'Темна тема')
+        self.theme_var.set(c['title'])
+        # зоряне тло між розділами й світні рамки навколо них (лише в темах з прикрасами)
+        if getattr(self, 'deco', None) is None:
+            self.deco = themes.Deco(self, self.theme)
+            self.deco.frame(self)
+            for w in self.deco_rings:
+                self.deco.around(w)
+        else:
+            self.deco.retheme(self.theme)
 
         self.log.configure(bg=c['logbg'], fg=c['logfg'], insertbackground=c['fg'],
                            font=('Segoe UI', 10))
@@ -423,11 +412,19 @@ class App(tk.Tk):
         self.log.tag_bind('link', '<Leave>', lambda e: self.log.configure(cursor=''))
         self.chibi.configure(bg=c['logbg'])
 
-    def _toggle_theme(self):
-        self.theme = 'dark' if self.theme == 'light' else 'light'
+    def _set_theme(self, name):
+        if name == self.theme:
+            return
+        # sv-ttk <-> clam на ходу лишає частині підписів старий фон — тема ляже після перезапуску
+        restart = themes.get(name)['engine'] != themes.get(self.theme)['engine']
+        self.theme = name
         self.settings['theme'] = self.theme
         save_settings(self.settings)
         self._apply_theme()
+        if restart:
+            self.say('Тему змінено — щоб вона лягла повністю, перезапусти програму.', 'dim')
+        elif any(w is not None and w.winfo_exists() for w in (self.editor_win, self.reminders_win)):
+            self.say('Тема відкритих вікон зміниться, коли їх перевідкрити.', 'dim')
 
     # --------------------------------------------------------------- шляхи
     def _pick(self):
@@ -475,6 +472,8 @@ class App(tk.Tk):
         self.path_var.set(self.settings.get(self.game.get(), ''))
         if hasattr(self, 'textures'):
             self.textures.set(self._textures_on())
+        if hasattr(self, 'mt_game'):
+            self.mt_game.set(self._mt_in_game())
         w = getattr(self, 'reminders_win', None)
         if w is not None and w.winfo_exists():              # нагадування — іншої гри
             w.reload(self._xl_now(), GAMES[self.game.get()]['title'])
@@ -593,6 +592,16 @@ class App(tk.Tk):
 
     def _textures_on(self, game=None):
         return bool((self.settings.get('textures') or {}).get(game or self.game.get(), True))
+
+    def _mt_in_game(self, game=None):
+        return bool((self.settings.get('mt_in_game') or {}).get(game or self.game.get(), False))
+
+    def _save_mt_game(self):
+        self.settings.setdefault('mt_in_game', {})[self.game.get()] = bool(self.mt_game.get())
+        save_settings(self.settings)
+        self.say('Машинний переклад ' + ('підставлятиметься в гру там, де ще немає свого — лише '
+                 'для пробного проходу, перед справжнім «2» вимкни.' if self.mt_game.get() else
+                 'в гру не йде: там, де немає свого перекладу, буде оригінал.'), 'dim')
 
     def _save_textures(self):
         self.settings.setdefault('textures', {})[self.game.get()] = bool(self.textures.get())
@@ -819,7 +828,8 @@ class App(tk.Tk):
 
     DEPS = (('openpyxl', 'openpyxl'), ('UnityPy', 'UnityPy'), ('PIL', 'Pillow'),
             ('texture2ddecoder', 'texture2ddecoder'), ('etcpak', 'etcpak'),
-            ('sv_ttk', 'sv-ttk'), ('fontTools', 'fonttools'), ('numpy', 'numpy'))
+            ('sv_ttk', 'sv-ttk'), ('fontTools', 'fonttools'), ('numpy', 'numpy'),
+            ('anthropic', 'anthropic'))         # машинний переклад через Claude (з 3.0)
 
     def _check_deps(self):
         import importlib.util
@@ -1064,8 +1074,36 @@ class App(tk.Tk):
         self._require_closed()
         self._check_space()
         self._require_originals()
-        if not self._read_translation():
+        done = self._read_translation()
+        lent = self._lend_mt(g, xl)
+        # скільки чернеток пішло в гру останнім «2» — інсталятор попередить
+        self.settings.setdefault('mt_in_last_import', {})[g] = lent[2] if lent else 0
+        save_settings(self.settings)
+        if not done and not lent:
             raise RuntimeError('Перекладу ще немає — нема чого заливати.')
+        try:
+            self._import_build(g, work, xl, out, bk)
+        finally:
+            if lent:                    # у work\ знову лише справжній переклад
+                lent[0].return_mt(lent[1])
+
+    def _lend_mt(self, g, xl):
+        """Галочка «Підставляти машинний»: чернетки -> work\\ на час збирання. -> (проєкт,
+        source-и) або None. Без редактора (лише книги Excel) машинного немає."""
+        import project
+        pr = getattr(self, '_project', None)
+        if not self._mt_in_game(g) or not project.enabled(xl) or pr is None or pr.game != g:
+            return None
+        n, sources = pr.lend_mt()
+        if not n:
+            return None
+        self.say(f'  Увага: машинний переклад підставлено в {n} рядків (галочка «Підставляти '
+                 'машинний…») — це неперевірена чернетка, лише для пробного проходу.', 'warn')
+        return pr, sources, n
+
+    def _import_build(self, g, work, xl, out, bk):
+        """Перевірка, збирання файлів гри й копія в гру (переклад уже в work\\)."""
+        import sheets
         warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl), rows=sheets.load_row_limits(xl)), xl)
         if warn:
             self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок, '
@@ -1310,6 +1348,11 @@ class App(tk.Tk):
         root, dest = self.root_dir(), self.data_dir()
         if not os.path.isdir(bk):
             raise RuntimeError('У грі ще немає перекладу. Спершу натисни «2. Залити переклад у гру».')
+        n_mt = (self.settings.get('mt_in_last_import') or {}).get(g, 0)
+        if n_mt:
+            self.say(f'Увага: в останнє «2» підставлено машинний переклад у {n_mt} рядків — вони потраплять '
+                     'в інсталятор неперевіреними. Щоб їх не було: вимкни «Підставляти машинний…», '
+                     'натисни «2» і створи інсталятор знову.', 'warn')
         game = dict(GAMES[g], data=os.path.relpath(dest, root) if dest != root else '')
         # наші файли без оригіналу — ті самі, що _copy_into_game кладе без бекапу
         extra = []
@@ -1380,6 +1423,10 @@ class App(tk.Tk):
                                     ('empty', 'порожній оригінал')) if h.get(w, {}).get('rows')]
             if parts:
                 self.say('Не рахуються (приховано): ' + '; '.join(parts) + '.', 'mono')
+        if pr.get('reviewed') or pr.get('mt'):          # рівні перекладу (з 3.0)
+            n = lambda v: f'{v:,}'.replace(',', ' ')
+            self.say(f'Вичитано: {n(pr.get("reviewed", 0))} з {n(pr["done"])} перекладених рядків; '
+                     f'лише машинний (перекладу ще немає): {n(pr.get("mt", 0))}.', 'mono')
         self._remember_pc(pr['done'], pr['total'])
         pc = 100 * pr['done'] / pr['total'] if pr['total'] else 0
         self.set_status(f'Перекладено {pr["done"]}/{pr["total"]} ({pc:.1f}%).')
@@ -1619,7 +1666,7 @@ class App(tk.Tk):
         return THEMES[self.theme]
 
     def dark_titlebar(self, win):
-        dark_titlebar(win, self.theme == 'dark')
+        dark_titlebar(win, themes.is_dark(self.theme))
 
     def open_feedback(self, ctx=None):
         """Вікно «Повідомити про проблему» (feedback_window.py); ctx — рядок, звідки відкрито."""

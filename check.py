@@ -164,6 +164,60 @@ def check_ch():
               f'схема «{sch.kind}» та сама, що обрано вручну')
 
 
+def check_mt():
+    """Машинний переклад без мережі: коди -> заглушки -> назад, фальшивий сервіс, що спершу
+    губить код (повторний запит його виправляє), запис у поле «Машинний» проєкту."""
+    print('\n=== Машинний переклад (без мережі) ===')
+    import tempfile, threading
+    import project
+    from mt import codes, job
+    m = codes.mask('Got <ITEM> x%d! <#ff0000>Red</color> {Amount}', codes.GENERIC)
+    assert m.text == 'Got ⟦0⟧ x⟦1⟧! ⟦2⟧Red⟦3⟧ ⟦4⟧', m.text
+    assert m.unmask('Є ⟦0⟧ ×⟦1⟧! ⟦2⟧Червоний⟦3⟧ ⟦4⟧') == ('Є <ITEM> ×%d! <#ff0000>Червоний</color> {Amount}', None)
+    assert m.unmask('Є ⟦0⟧')[1].startswith('загублено')
+    x = codes.mask('A & B <i>c</i>\nnext %s', codes.GENERIC, style='xml')
+    assert x.unmask('А &amp; Б <x i="0"></x>в<x i="1"/><br>далі <x i="2"/>', 'xml') == ('А & Б <i>в</i>\nдалі %s', None)
+    print('OK  коди -> заглушки -> назад (⟦N⟧ і <x/>), загублений код ловиться')
+    tmp = tempfile.mkdtemp()
+    try:
+        work, xl = os.path.join(tmp, 'work'), os.path.join(tmp, 'xl')
+        import common
+        common.save_rich(work, 'crystar', 'Event/ev_000000/ev_000000_msg', 'unity-mb2', [
+            {'id': '0', 'src': 'Take <ITEM> now.'}, {'id': '1', 'src': 'Hello.'},
+            {'id': '2', 'src': 'Hello.'}])
+        pr = project.Project('crystar', work, xl)
+        calls = []
+
+        class Fake:
+            name, label, style = 'fake', 'Тест', 'br'
+            batch_rows, batch_chars = 10, 1000
+
+            def translate(self, items, scene):
+                calls.append(items)
+                return {it['id']: ('УКР ' + it['text']).replace('⟦0⟧', '' if not it.get('retry') else '⟦0⟧')
+                        for it in items}
+
+            def spent(self):
+                return ''
+
+        rows = job.pick(pr, pr.rows)
+        assert len(rows) == 2                       # «Hello.» двічі — перекладається раз
+        out = []
+        j = job.Job(pr, Fake(), rows, None, [], None, lambda k, d: out.append((k, d)), threading.Event())
+        j.run()
+        res = [kv for k, d in out if k == 'result' for kv in d]
+        assert len(calls) == 2 and calls[1][0].get('problem', '').startswith('загублено'), calls
+        for k, t in res:
+            pr.set_mt(k, t, 'Тест')
+        got = {r['e']['id']: pr.mt(r) for r in pr.rows}
+        assert got == {'0': 'УКР Take <ITEM> now.', '1': 'УКР Hello.', '2': 'УКР Hello.'}, got
+        assert not any(r['e'].get('tr') for r in pr.rows)
+        print('OK  пакет: однакові — раз, загублений код — повторний запит, машинний у всіх однакових, '
+              'переклад не чіпано')
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == '__main__':
     which = sys.argv[1] if len(sys.argv) > 1 else 'both'
     if which in ('both', 'msk'):
@@ -174,4 +228,6 @@ if __name__ == '__main__':
         check_nep()
     if which in ('ch',):
         check_ch()
+    if which in ('mt',):
+        check_mt()
     print('\nВсе гаразд.')
