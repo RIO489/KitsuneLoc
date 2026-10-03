@@ -20,6 +20,7 @@ import glossary, project, sheets
 SAVE_DELAY = 1500           # мс після останньої правки — запис на диск
 COMMIT_DELAY = 250          # мс після набору — переклад іде в рядок (і в однакові)
 PREVIEW_W = 560             # ширина прев'ю в панелі, px
+COUNT_MODES = {'all': '⇄ Усе', 'uniq': '⇄ Без повторів', 'hidden': '⇄ Приховане'}
 FILTERS = ('Усі', 'Неперекладені', 'Перекладені', 'Відв\'язані', 'З приміткою', 'Не перекладати')
 
 
@@ -283,6 +284,10 @@ class Editor(tk.Toplevel):
         self.tr_text.bind('<Control-Up>', lambda e: self._step(-1))
         self._grip(right, 'tr', self.tr_text)
         self.bind('<Control-f>', lambda e: (self.search.focus_set(), 'break')[1])
+        self.bind('<Control-h>', lambda e: (self._replace_all(), 'break')[1])
+        # права кнопка в полях: виділений фрагмент -> «Замінити всюди» (tkkeys.kl_menu)
+        for t in (self.src_text, self.tr_text):
+            t.kl_menu = [('Замінити всюди…  (Ctrl+H)', lambda t=t: self._replace_all(t))]
 
         lk = ttk.Frame(right)
         lk.pack(fill='x', pady=(4, 0))
@@ -290,6 +295,7 @@ class Editor(tk.Toplevel):
         ttk.Label(lk, textvariable=self.link_info, style='Hint.TLabel').pack(side='left')
         self.b_link = ttk.Button(lk, text='', command=self._toggle_link)
         self.b_link.pack(side='right')
+        self.b_places = ttk.Button(lk, text='Усі місця…', command=self._places)
 
         nf = ttk.Frame(right)
         nf.pack(fill='x', pady=(6, 0))
@@ -320,6 +326,7 @@ class Editor(tk.Toplevel):
         self.lim_box = ttk.Frame(right)
         self.lim_box.pack(anchor='w', fill='x', pady=(4, 0))
         self.lim_vars = {}                       # id екрана -> IntVar
+        self._build_rowlim(right)
 
         bot = ttk.Frame(self.content, padding=(10, 2, 10, 8))
         bot.pack(fill='x')
@@ -327,6 +334,12 @@ class Editor(tk.Toplevel):
         ttk.Label(bot, textvariable=self.status, style='Hint.TLabel').pack(side='left')
         self.count = tk.StringVar()
         ttk.Label(bot, textvariable=self.count).pack(side='right')
+        # що рахує нижній рядок: усе / без повторів (ціна перекладу) / приховане
+        self.count_mode = getattr(self.app, 'settings', {}).get('editor_count', 'all')
+        if self.count_mode not in COUNT_MODES:
+            self.count_mode = 'all'
+        self.b_count = ttk.Button(bot, text=COUNT_MODES[self.count_mode], command=self._count_next)
+        self.b_count.pack(side='right', padx=(0, 6))
         # як у «Гра на екрані»: редактор над грою (перекладач грає й одразу править)
         settings = getattr(self.app, 'settings', {})
         self.ontop = tk.BooleanVar(value=bool(settings.get('editor_ontop', False)))
@@ -490,15 +503,15 @@ class Editor(tk.Toplevel):
         try:
             docs = [d for _p, d in self.pr.docs.values()]
             ctx = sheets.limits(docs, self.bk, os.path.dirname(os.path.abspath(self.pr.work)),
-                                sheets.load_widths(self.pr.xl))
+                                sheets.load_widths(self.pr.xl), sheets.load_row_limits(self.pr.xl))
             self.q.put(('ctx', ctx))
         except Exception as ex:                                   # noqa: BLE001
             self.q.put(('status', f'Межі ширини не пораховано: {ex}'))
         try:
             import preview
-            fonts = {'msg': preview.GameFont(self.game, self.bk)}
+            fonts = {'msg': preview.game_font(self.game, self.bk)}
             if self.game == 'nep':
-                fonts['adv'] = preview.GameFont(self.game, self.bk, 'adv')
+                fonts['adv'] = preview.game_font(self.game, self.bk, 'adv')
             self.q.put(('font', fonts))
         except Exception as ex:                                   # noqa: BLE001
             self.q.put(('status', f'Прев\'ю недоступне: {ex}'))
@@ -547,6 +560,9 @@ class Editor(tk.Toplevel):
         all_rows = [r for sc in books.values() for rs in sc.values() for r in rs]
         t.insert('', 'end', iid='all', text='Усі рядки', values=(self._pc(all_rows),), open=True)
         self.nodes['all'] = ('all', None)
+        # усі рядки, що мають однакові (×N), групами повторів поспіль
+        t.insert('', 'end', iid='dups', text='Повтори', values=(self._pc(self.pr.dup_rows(all_rows)),))
+        self.nodes['dups'] = ('dups', None)
         t.insert('', 'end', iid='mine', text='Мої групи', open=True)
         self.nodes['mine'] = ('mine', None)
         for i, g in enumerate(self.pr.groups()):
@@ -574,8 +590,10 @@ class Editor(tk.Toplevel):
         """Лише відсотки в дереві (після правок) — без перебудови."""
         books = self.pr.books()
         for iid, (kind, val) in self.nodes.items():
-            if kind == 'all':
+            if kind in ('all', 'dups'):
                 rows = [r for sc in books.values() for rs in sc.values() for r in rs]
+                if kind == 'dups':
+                    rows = self.pr.dup_rows(rows)
             elif kind == 'group':
                 rows = self.pr.group_rows(val)
             elif kind == 'book':
@@ -610,7 +628,8 @@ class Editor(tk.Toplevel):
             return [r for rs in books.get(val, {}).values() for r in rs]
         if kind == 'scene':
             return books.get(val[0], {}).get(val[1], [])
-        return [r for sc in books.values() for rs in sc.values() for r in rs]
+        rows = [r for sc in books.values() for rs in sc.values() for r in rs]
+        return self.pr.dup_rows(rows) if kind == 'dups' else rows
 
     def _show_node(self, iid):
         self.node = iid
@@ -655,17 +674,44 @@ class Editor(tk.Toplevel):
 
     def _count(self, rows):
         """Нижній рядок: рядки й слова (в оригіналі) того, що показано; «не перекладати»,
-        службові й порожні — не рахуються."""
-        done = sum(1 for r in rows if r['e'].get('tr'))
+        службові й порожні — не рахуються. Кнопка поруч перемикає: усе / без повторів
+        (однаковий рядок — раз: так рахують ціну перекладу) / приховане."""
+        n = lambda v: f'{v:,}'.replace(',', ' ')
+        pc = lambda a, b: f' ({100 * a // b}%)' if b else ''
+        if self.count_mode == 'hidden':
+            # приховане — з усього вузла, не лише з того, що лишив фільтр
+            h = self.pr.hidden(self._node_rows(self.node))
+            parts = [f'{lab}: {n(h[w]["rows"])} рядків, {n(h[w]["words"])} слів'
+                     + (f', {n(h[w]["ja"])} яп. знаків' if h[w]['ja'] else '')
+                     for w, lab in (('keep', '«не перекладати»'), ('key', 'службові ключі'),
+                                    ('empty', 'порожній оригінал')) if h[w]['rows']]
+            self.count.set('не рахуються — ' + ('; '.join(parts) if parts else 'немає'))
+            return
         st = self.pr.stats(rows)
-        w = f'{st["words_done"]:,} з {st["words"]:,}'.replace(',', ' ')
-        pc = f' ({100 * st["words_done"] // st["words"]}%)' if st['words'] else ''
+        if self.count_mode == 'uniq':
+            ja = ''
+            if st['uniq_ja']:
+                ja = (f' · японською: {n(st["uniq_ja"])} знаків, перекладено {n(st["uniq_ja_done"])}'
+                      + pc(st['uniq_ja_done'], st['uniq_ja']))
+            self.count.set(f'без повторів: рядків {n(st["uniq"])} (з {n(st["rows"])}) · перекладено: '
+                           f'{n(st["uniq_done"])} · слів перекладено: {n(st["uniq_words_done"])} з '
+                           f'{n(st["uniq_words"])}' + pc(st['uniq_words_done'], st['uniq_words']) + ja)
+            return
+        done = sum(1 for r in rows if r['e'].get('tr'))
+        w = f'{n(st["words_done"])} з {n(st["words"])}'
         ja = ''
         if st['ja']:                     # японський оригінал є — обсяг ще й у японських знаках
-            n = lambda v: f'{v:,}'.replace(',', ' ')
-            ja = (f' · японською: {n(st["ja"])} знаків, з них перекладено {n(st["ja_done"])} '
-                  f'({100 * st["ja_done"] // st["ja"]}%)')
-        self.count.set(f'рядків: {len(rows)} · перекладено: {done} · слів перекладено: {w}{pc}{ja}')
+            ja = (f' · японською: {n(st["ja"])} знаків, з них перекладено {n(st["ja_done"])}'
+                  + pc(st['ja_done'], st['ja']))
+        self.count.set(f'рядків: {len(rows)} · перекладено: {done} · слів перекладено: {w}'
+                       + pc(st['words_done'], st['words']) + ja)
+
+    def _count_next(self):
+        modes = list(COUNT_MODES)
+        self.count_mode = modes[(modes.index(self.count_mode) + 1) % len(modes)]
+        self.b_count.configure(text=COUNT_MODES[self.count_mode])
+        self._save_setting('editor_count', self.count_mode)
+        self._count(self.view)
 
     FIRST_CHUNK, CHUNK = 400, 2500
 
@@ -772,6 +818,7 @@ class Editor(tk.Toplevel):
                 self.link_info.set('')
                 self.tr_count.set('')
                 self.b_link.pack_forget()
+                self.b_places.pack_forget()
                 return
             r = self.pr.by_key[k]
             e = r['e']
@@ -816,8 +863,11 @@ class Editor(tk.Toplevel):
         if twins <= 1:
             self.link_info.set('Цей рядок у грі один.')
             self.b_link.pack_forget()
+            self.b_places.pack_forget()
             return
         self.b_link.pack(side='right')
+        self.b_places.pack(side='right', padx=(0, 6))
+        self.b_places.configure(text=f'Усі {twins} місця…' if twins < 5 else f'Усі {twins} місць…')
         if r.get('окремо'):
             self.link_info.set(f'Відв\'язано: такий самий оригінал ще в {twins - 1} місцях, '
                                'а тут — свій переклад.')
@@ -827,6 +877,68 @@ class Editor(tk.Toplevel):
             self.link_info.set(f'Такий самий оригінал ще в {twins - 1} місцях — переклад спільний '
                                f'({n} пов\'язаних).')
             self.b_link.configure(text='Відв\'язати тут')
+
+    def _places(self):
+        """Вікно з усіма місцями, де в грі той самий оригінал: де саме, спільний переклад чи
+        свій; подвійний клік — до рядка; відв'язати / прив'язати вибрані."""
+        if not self.cur:
+            return
+        self._commit()
+        k0 = self.cur
+        old = getattr(self, '_places_win', None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        w = self._places_win = tk.Toplevel(self)
+        w.title('Усі місця рядка: ' + one_line(self.pr.by_key[k0]['e']['src'])[:60])
+        w.geometry('900x360')
+        w.configure(bg=self.c['bg'])
+        w.transient(self)
+        ttk.Label(w, text='Подвійний клік — перейти до рядка. Спільний переклад іде в усі пов\'язані '
+                  'місця; відв\'язаний рядок перекладається окремо (і окремо рахується в ціні).',
+                  style='Hint.TLabel', wraplength=860, justify='left').pack(anchor='w', padx=10, pady=(8, 4))
+        fr = ttk.Frame(w)
+        fr.pack(fill='both', expand=True, padx=10)
+        cols = ('book', 'scene', 'who', 'state', 'tr')
+        tv = ttk.Treeview(fr, columns=cols, show='headings', selectmode='extended', style='Ed.Treeview')
+        for c_, t_, wd in (('book', 'Книга', 170), ('scene', 'Сцена / файл', 170), ('who', 'Хто', 110),
+                           ('state', 'Стан', 110), ('tr', 'Переклад', 300)):
+            tv.heading(c_, text=t_)
+            tv.column(c_, width=wd, stretch=c_ == 'tr')
+        sb = ttk.Scrollbar(fr, orient='vertical', command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        tv.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+
+        def fill():
+            tv.delete(*tv.get_children())
+            for k in self.pr.twins(k0):
+                r = self.pr.by_key[k]
+                st = ('не перекладати' if r.get('лишити') else 'відв\'язано' if r.get('окремо')
+                      else 'спільний')
+                who = self.pr.speaker(r) if r['kind'] not in ('name', 'key') else r['kind']
+                tv.insert('', 'end', iid=k, values=(r['book'], r['scene'] or '—', who, st,
+                                                    one_line(r['e'].get('tr', ''))),
+                          tags=('cur',) if k == self.cur else ())
+            tv.tag_configure('cur', foreground=self.c.get('accent', '#57c8ff'))
+
+        def act(fn):
+            keys = list(tv.selection())
+            if not keys:
+                return
+            changed = fn(keys) or []
+            self._update_rows(self.pr.twins(k0) + list(changed))
+            self._refresh_pcs()
+            self._show_row()
+            self._later('save', SAVE_DELAY, self._save)
+            fill()
+
+        tv.bind('<Double-1>', lambda ev: tv.identify_row(ev.y) and self.goto(tv.identify_row(ev.y)))
+        bf = ttk.Frame(w)
+        bf.pack(fill='x', padx=10, pady=8)
+        ttk.Button(bf, text='Відв\'язати вибрані', command=lambda: act(self.pr.detach)).pack(side='left')
+        ttk.Button(bf, text='Прив\'язати вибрані', command=lambda: act(self.pr.attach)).pack(side='left', padx=6)
+        ttk.Button(bf, text='Закрити', command=w.destroy).pack(side='right')
+        fill()
 
     def _keep_note(self):
         """Підказка під полем: рядок позначено «не перекладати»."""
@@ -986,9 +1098,13 @@ class Editor(tk.Toplevel):
             self.pic_extra += [lab, img]
 
     def _lim_click(self, lab, sc=None, k=None):
+        import preview
+        if sc == 'row' and k:                    # межа окремого рядка
+            lab.configure(cursor='crosshair')
+            lab.bind('<Button-1>', lambda ev: self.rowlim_px.set(max(10, round(ev.x / k - preview.PAD))))
+            return
         if not sc or not k or sc['id'] not in self.lim_vars:
             return
-        import preview
         lab.configure(cursor='crosshair')
         lab.bind('<Button-1>', lambda ev: self.lim_vars[sc['id']].set(max(50, round(ev.x / k - preview.PAD))))
 
@@ -1023,6 +1139,111 @@ class Editor(tk.Toplevel):
             show()
             v.trace_add('write', lambda *_, sc=sc, v=v, show=show: self._lim_changed(sc, v, show))
 
+    # ============================================================ межа окремого рядка (з 2.9)
+    def _build_rowlim(self, parent):
+        """«Межа для цього рядка»: місце на екрані, якого програма сама не знає (поля
+        інтерфейсу Crystar…): ширина в px шрифту гри й скільки рядків уміщає. Пишеться в
+        межі.json → діє і в прев'ю, і в перевірці перекладу."""
+        box = self.rowlim_box = ttk.Frame(parent)
+        self.rowlim_info = tk.StringVar()
+        ttk.Label(box, textvariable=self.rowlim_info, style='Hint.TLabel', wraplength=PREVIEW_W,
+                  justify='left').pack(anchor='w')
+        row = ttk.Frame(box)
+        row.pack(anchor='w', fill='x', pady=(2, 0))
+        ttk.Label(row, text='Межа рядка: ширина').pack(side='left')
+        self.rowlim_px = tk.IntVar(value=0)
+        ttk.Spinbox(row, from_=10, to=4000, increment=1, textvariable=self.rowlim_px,
+                    width=6).pack(side='left', padx=4)
+        ttk.Label(row, text='px, рядків').pack(side='left')
+        self.rowlim_lines = tk.IntVar(value=0)
+        ttk.Spinbox(row, from_=0, to=20, increment=1, textvariable=self.rowlim_lines,
+                    width=3).pack(side='left', padx=4)
+        row2 = ttk.Frame(box)
+        row2.pack(anchor='w', fill='x', pady=(2, 0))
+        self.b_rowlim_sel = ttk.Button(row2, text='Для вибраних рядків', command=self._rowlim_to_selected)
+        self.b_rowlim_sel.pack(side='left')
+        self.b_rowlim_reset = ttk.Button(row2, text='Як за оригіналом', command=self._rowlim_reset)
+        self.b_rowlim_reset.pack(side='left', padx=6)
+        self._rowlim_lock = False
+        for v in (self.rowlim_px, self.rowlim_lines):
+            v.trace_add('write', lambda *_: self._rowlim_changed())
+
+    def _rowlim_key(self):
+        r = self.pr.by_key.get(self.cur) if self.cur else None
+        return r and f'{r["source"]}\t{r["e"]["id"]}'
+
+    def _rowlim_show(self, lim, lines):
+        """Показати межу поточного рядка (своя чи за оригіналом) — без запису."""
+        own = (self.ctx.get('rowlim') or {}).get(self._rowlim_key())
+        self._rowlim_lock = True
+        self.rowlim_px.set(int(round(lim)))
+        self.rowlim_lines.set(int(lines or 0))
+        self._rowlim_lock = False
+        wrap = ' Гра сама переносить слова за цією шириною.' if self.ctx.get('wrap') else ''
+        self.rowlim_info.set(('Своя межа цього рядка.' if own else
+                              'Межа — оцінка за оригіналом. Якщо в грі текст не влазить чи місця більше, '
+                              'задай свою:') + ' Клік по прев\'ю — ширина там, де клікнули; '
+                             '«рядків» 0 — без обмеження.' + wrap)
+        self.b_rowlim_reset.state(['!disabled'] if own else ['disabled'])
+        n = len(self.selected_keys())
+        self.b_rowlim_sel.configure(text=f'Для вибраних рядків ({n})' if n > 1 else 'Для вибраних рядків')
+        self.b_rowlim_sel.state(['!disabled'] if n > 1 else ['disabled'])
+
+    def _rowlim_value(self):
+        try:
+            px, lines = int(self.rowlim_px.get()), int(self.rowlim_lines.get())
+        except (tk.TclError, ValueError):
+            return None                          # ще набирають число
+        if px < 10:
+            return None
+        d = {'px': px}
+        if lines > 0:
+            d['рядків'] = lines
+        return d
+
+    def _rowlim_changed(self):
+        if self._rowlim_lock or self.ctx is None:
+            return
+        k, d = self._rowlim_key(), self._rowlim_value()
+        if not k or d is None:
+            return
+        rl = self.ctx.setdefault('rowlim', {})
+        if rl.get(k) == d:
+            return
+        rl[k] = d
+        self._rowlim_saved()
+
+    def _rowlim_saved(self):
+        self._later('preview', 150, self._preview)
+        if self.cur:
+            self._checks()
+        self._later('rowlims', 600, self._save_rowlims)
+
+    def _rowlim_to_selected(self):
+        d = self._rowlim_value()
+        if d is None or self.ctx is None:
+            return
+        rl = self.ctx.setdefault('rowlim', {})
+        keys = self.selected_keys()
+        for k in keys:
+            r = self.pr.by_key[k]
+            rl[f'{r["source"]}\t{r["e"]["id"]}'] = dict(d)
+        self._rowlim_saved()
+        self.status.set(f'Межу рядка ({d["px"]} px' + (f', рядків {d["рядків"]}' if 'рядків' in d else '')
+                        + f') задано для {len(keys)} рядків.')
+
+    def _rowlim_reset(self):
+        if self.ctx is None:
+            return
+        (self.ctx.get('rowlim') or {}).pop(self._rowlim_key(), None)
+        self._rowlim_saved()
+
+    def _save_rowlims(self):
+        try:
+            sheets.save_row_limits(self.pr.xl, (self.ctx or {}).get('rowlim') or {})
+        except OSError as ex:
+            self.status.set(f'Межу рядка не збережено: {ex}')
+
     def _lim_changed(self, sc, v, show):
         try:
             n = int(v.get())
@@ -1050,6 +1271,7 @@ class Editor(tk.Toplevel):
 
     def _preview(self):
         k = self.cur
+        self.rowlim_box.pack_forget()            # знову покажемо нижче, якщо є прев'ю шрифтом гри
         if not k:
             self._pics([(None, None, '')])
             return
@@ -1074,6 +1296,11 @@ class Editor(tk.Toplevel):
             self.lim_box.pack(anchor='w', fill='x', pady=(4, 0), after=self.pic_box)
         else:
             self.lim_box.pack_forget()
+        if dialog:
+            self.rowlim_box.pack_forget()
+        else:                                    # межа окремого рядка (діалогам — межі вікон)
+            self.rowlim_box.pack(anchor='w', fill='x', pady=(4, 0),
+                                 after=self.lim_box if self.lim_box.winfo_manager() else self.pic_box)
         width = max(200, min(PREVIEW_W, self.pic_box.winfo_width() - 8))
         items = []
         for sc in screens or [None]:
@@ -1081,6 +1308,8 @@ class Editor(tk.Toplevel):
             if font is None:
                 continue
             lim, lines, _w = sheets.width_limit(doc, e, self.ctx, sc)
+            if not dialog:
+                self._rowlim_show(lim, lines)
             try:
                 im, _notes = preview.render(font, text, lim, lines, name, dialog)
             except Exception as ex:                               # noqa: BLE001
@@ -1088,7 +1317,7 @@ class Editor(tk.Toplevel):
                 continue
             cap = sc['назва'].capitalize() if sc and len(screens) > 1 else None
             small = preview.fit(im, width)
-            items.append((cap, small, '', sc, small.width / im.width))
+            items.append((cap, small, '', sc if dialog else 'row', small.width / im.width))
         self._pics(items or [(None, None, '')])
 
     # ============================================================ групи
@@ -1123,6 +1352,7 @@ class Editor(tk.Toplevel):
         m.add_command(label='Вставити з буфера в переклад', command=lambda: self._paste(keys))
         m.add_command(label='Скопіювати оригінал у переклад', command=lambda: self._copy_src(keys))
         m.add_command(label='Очистити переклад', command=lambda: self._clear(keys))
+        m.add_command(label='Замінити всюди…  (Ctrl+H)', command=self._replace_all)
         m.add_separator()
         m.add_command(label='Повідомити про цей рядок…', command=lambda: self._report(keys[0]))
         try:
@@ -1265,6 +1495,22 @@ class Editor(tk.Toplevel):
         for k in keys:
             changed += self.pr.set_tr(k, '')
         self._after_bulk(changed, 'Очищено')
+
+    def _replace_all(self, field=None):
+        """«Замінити всюди» (replace_window): фрагмент — виділене в полі оригіналу/перекладу."""
+        import replace_window
+        find = ''
+        for t in ([field] if field else []) + [self.src_text, self.tr_text]:
+            try:
+                find = t.get('sel.first', 'sel.last').strip()
+            except tk.TclError:
+                continue
+            if find:
+                break
+        old = getattr(self, '_replace_win', None)
+        if old is not None and old.winfo_exists():
+            old.destroy()
+        self._replace_win = replace_window.ReplaceWindow(self, find.split('\n')[0])
 
     def _after_bulk(self, keys, what):
         tw = set(keys)

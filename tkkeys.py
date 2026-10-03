@@ -37,6 +37,12 @@ def _menu(ev):
                   state='disabled' if ro else 'normal')
     m.add_separator()
     m.add_command(label='Виділити все', command=lambda: w.event_generate('<<SelectAll>>'))
+    # вікно може додати свої пункти полю: w.kl_menu = [(підпис, функція), ...]
+    extra = getattr(w, 'kl_menu', None)
+    if extra:
+        m.add_separator()
+        for label, fn in extra:
+            m.add_command(label=label, command=fn)
     try:
         m.tk_popup(ev.x_root, ev.y_root)
     finally:

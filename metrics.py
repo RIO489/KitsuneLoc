@@ -9,9 +9,15 @@
 
 Шрифт, схема символів (як текст стає гліфами) і службові коди — з профілю гри рушія
 (compileheart/profiles.py); код один для всіх ігор. У MSK msgfont і sysfont однакові,
-у Neptunia головне вікно — advfont. Гра без профілю (Crystar) — None.
+у Neptunia головне вікно — advfont.
+
+Unity (з 2.9): TMP-шрифт з бандла, названого в FONT_BUNDLES модуля translate_<гра>
+(Crystar: uistatic), після unity/fontfix — unity/tmpgame. Теги тексту (<CHARA=…>) не
+малюються; TMP сам переносить слова (wraps, wrap).
 """
-import json, os
+import importlib, json, os, re
+
+_TAG = re.compile(r'<[^<>]*>')
 
 
 def _profile(game):
@@ -25,6 +31,24 @@ def _font_file(game, backup_dir):
         return None
     p = os.path.join(backup_dir, *prof.FONT_ARCHIVE.split('/'))
     return p if os.path.exists(p) else None
+
+
+def unity_bundle(game, backup_dir):
+    """Бандл з TMP-шрифтом гри Unity в оригіналах (backup) або None."""
+    try:
+        mod = importlib.import_module(f'translate_{game}')
+    except ImportError:
+        return None
+    for name in getattr(mod, 'FONT_BUNDLES', ()):
+        p = os.path.join(backup_dir, name)
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def wraps(game, backup_dir):
+    """Чи гра сама переносить слова за шириною поля (TMP) — тоді межа рядків важить більше."""
+    return _profile(game) is None and unity_bundle(game, backup_dir) is not None
 
 
 def game_font(game, path, font='msg'):
@@ -61,9 +85,12 @@ def table(game, backup_dir, cache_dir, font='msg'):
     font — 'msg' (msgfont: інтерфейс, таблиці, історія діалогів) або 'adv'
     (Neptunia: advfont головного вікна діалогу)."""
     prof = _profile(game)
-    if prof is None or font not in prof.FONTS:
+    if prof is None:
+        path = unity_bundle(game, backup_dir) if font == 'msg' else None
+    elif font not in prof.FONTS:
         return None
-    path = _font_file(game, backup_dir)
+    else:
+        path = _font_file(game, backup_dir)
     if not path:
         return None
     cache = os.path.join(cache_dir, f'_ширини_{game}.json' if font == 'msg'
@@ -77,7 +104,14 @@ def table(game, backup_dir, cache_dir, font='msg'):
     except (OSError, ValueError):
         pass
     try:
-        tab = _build(game, path, font)
+        if prof is None:
+            from unity import tmpgame
+            got = tmpgame.load(path)
+            if got is None:
+                return None
+            tab = tmpgame.widths(got[0])
+        else:
+            tab = _build(game, path, font)
     except Exception:
         return None
     try:
@@ -94,7 +128,8 @@ def _code_sig():
     out = []
     for p in ('maryskelter/fontfix.py', 'neptunia/fontfix.py', 'neptunia/chars.py', 'maryskelter/chars.py',
               'maryskelter/profile.py', 'neptunia/profile.py',
-              'compileheart/fontfix.py', 'compileheart/ffu.py', 'compileheart/scheme.py'):
+              'compileheart/fontfix.py', 'compileheart/ffu.py', 'compileheart/scheme.py',
+              'unity/fontfix.py', 'unity/sdf.py', 'unity/tmpgame.py'):
         try:
             out.append(str(int(os.path.getmtime(os.path.join(here, p)))))
         except OSError:
@@ -108,5 +143,21 @@ def width(line, tab, game):
     prof = _profile(game)
     if prof is not None:
         line = prof.SCHEME.plain(prof.CODES.sub('', line))
+    else:
+        line = _TAG.sub('', line)
     avg = tab.get('n') or 12
     return sum(tab.get(ch, avg) for ch in line)
+
+
+def wrap(line, limit, tab, game):
+    """Рядок, перенесений за словами в межу (як TMP): [рядки]. Слово, ширше за межу, — окремим рядком."""
+    out, cur = [], ''
+    for word in line.split(' '):
+        cand = word if not cur else cur + ' ' + word
+        if cur and width(cand, tab, game) > limit:
+            out.append(cur)
+            cur = word
+        else:
+            cur = cand
+    out.append(cur)
+    return out

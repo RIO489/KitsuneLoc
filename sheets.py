@@ -695,10 +695,11 @@ def _backup_of(work_dir):
     return os.path.join(os.path.dirname(os.path.dirname(w)), 'backup', os.path.basename(w))
 
 
-def limits(docs, backup_dir, cache_dir, widths=None):
+def limits(docs, backup_dir, cache_dir, widths=None, rows=None):
     """Межі з оригіналів для перевірки ширини: {'wtab', 'game', 'gmax', 'gcount', 'glines'}.
     По групах (див. _width_group): найширший рядок і найбільше рядків в оригіналах.
-    widths — межі вікон діалогу, задані перекладачем ({id екрана: px}, load_widths)."""
+    widths — межі вікон діалогу, задані перекладачем ({id екрана: px}, load_widths);
+    rows — межі окремих рядків від перекладача ({source\tid: {'px', 'рядків'}}, load_row_limits)."""
     import metrics
     docs = [d for d in docs if d.get('format') != 'atlas']   # написи малюємо самі: ліміти тут не діють
     game = next((d.get('game') for d in docs), None)
@@ -736,7 +737,8 @@ def limits(docs, backup_dir, cache_dir, widths=None):
         sc['lim0'] = sc.pop('px') or w[min(len(w) - 1, int(len(w) * DIALOG_PCT))]
         sc['lim'] = (widths or {}).get(sc['id']) or sc['lim0']
     return {'wtab': wtab, 'game': game, 'gmax': gmax, 'gcount': gcount, 'glines': glines,
-            'screens': screens}
+            'screens': screens, 'rowlim': rows or {},
+            'wrap': bool(game) and metrics.wraps(game, backup_dir)}
 
 
 DIALOG_PCT = 0.999          # частка рядків оригіналу, що мусить уміститися у вікні діалогу
@@ -746,26 +748,62 @@ DIALOG_PCT = 0.999          # частка рядків оригіналу, що
 WIDTHS_FILE = 'межі.json'   # Переклад\<гра>\межі.json: {id екрана: px} — перекладач сам поправив межу
 
 
-def load_widths(xl):
-    """Межі вікон діалогу, задані перекладачем (у грі текст обрізається раніше чи пізніше,
-    ніж виміряли ми): {id екрана ('adv', 'msg', 'log'): px}."""
+ROWS_KEY = 'рядки'          # у межі.json: межі окремих рядків {source\tid: {'px': n, 'рядків': m}}
+
+
+def _read_widths_file(xl):
     try:
         with open(os.path.join(xl, WIDTHS_FILE), encoding='utf-8') as f:
             d = json.load(f)
-        return {k: int(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0}
-    except (OSError, ValueError, AttributeError):
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
         return {}
 
 
-def save_widths(xl, widths):
-    """Записати межі перекладача; порожньо — файл прибирається (діє виміряне)."""
+def _write_widths_file(xl, d):
     path = os.path.join(xl, WIDTHS_FILE)
-    if not widths:
+    if not d:
         if os.path.exists(path):
             os.remove(path)
         return
     with open(path, 'w', encoding='utf-8') as f:
-        json.dump(widths, f, ensure_ascii=False, indent=1)
+        json.dump(d, f, ensure_ascii=False, indent=1)
+
+
+def load_widths(xl):
+    """Межі вікон діалогу, задані перекладачем (у грі текст обрізається раніше чи пізніше,
+    ніж виміряли ми): {id екрана ('adv', 'msg', 'log'): px}."""
+    d = _read_widths_file(xl)
+    return {k: int(v) for k, v in d.items() if isinstance(v, (int, float)) and v > 0}
+
+
+def save_widths(xl, widths):
+    """Записати межі вікон перекладача (межі рядків лишаються); порожньо — діє виміряне."""
+    d = {k: v for k, v in _read_widths_file(xl).items() if k == ROWS_KEY}
+    d.update(widths or {})
+    _write_widths_file(xl, d)
+
+
+def load_row_limits(xl):
+    """Межі окремих рядків від перекладача (з 2.9): {source\tid: {'px': n, 'рядків': m}} —
+    місце на екрані, яке програма сама не знає (Crystar: поля інтерфейсу)."""
+    rows = _read_widths_file(xl).get(ROWS_KEY)
+    out = {}
+    for k, v in (rows or {}).items() if isinstance(rows, dict) else ():
+        if isinstance(v, dict):
+            d = {n: int(v[n]) for n in ('px', 'рядків') if isinstance(v.get(n), (int, float)) and v[n] > 0}
+            if d:
+                out[k] = d
+    return out
+
+
+def save_row_limits(xl, rows):
+    d = _read_widths_file(xl)
+    if rows:
+        d[ROWS_KEY] = rows
+    else:
+        d.pop(ROWS_KEY, None)
+    _write_widths_file(xl, d)
 
 
 def width_limit(doc, e, ctx, screen=None):
@@ -775,6 +813,10 @@ def width_limit(doc, e, ctx, screen=None):
     import metrics
     wtab, game = ctx['wtab'], ctx['game']
     g = _width_group(doc, e)
+    own = (ctx.get('rowlim') or {}).get(f'{doc["source"]}\t{e["id"]}')
+    if own and g != ('діалог',):       # межа рядка від перекладача (діалогам — межі вікон)
+        wsrc = [metrics.width(x, wtab, game) for x in e['src'].split('\n')]
+        return own.get('px') or max(wsrc) * 1.35, own.get('рядків'), wsrc
     if g == ('діалог',) and ctx.get('screens'):
         screen = screen or ctx['screens'][0]
         wtab = screen['wtab']
@@ -832,12 +874,19 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
     if wtab:
         # діалог — кожен екран своїм шрифтом (досить першого, де не влазить)
         for sc in (ctx.get('screens') or [None]) if g == ('діалог',) else [None]:
-            lim, _lines, wsrc = width_limit(doc, e, ctx, sc)
+            lim, lines, wsrc = width_limit(doc, e, ctx, sc)
+            if ctx.get('wrap') and lines and g != ('діалог',):
+                # гра (TMP) сама переносить слова за шириною поля: важить, скільки рядків вийде
+                got = sum(len(metrics.wrap(x, lim, wtab, game)) for x in tr.split('\n'))
+                if got > lines:
+                    out.append(f'не влазить: гра перенесе в {got} рядк., а місця на {lines} '
+                               f'(межа {round(lim)} px) — скороти')
+                break
             wtr = [metrics.width(x, sc['wtab'] if sc else wtab, game) for x in tr.split('\n')]
             if max(wtr) > lim:
                 where = sc['назва'] if sc else 'місце на екрані'
-                out.append(f'рядок ширший за {where}: {max(wtr)} px при межі {round(lim)} px '
-                           f'(оригінал {max(wsrc)} px) — перенеси рядок або скороти')
+                out.append(f'рядок ширший за {where}: {round(max(wtr))} px при межі {round(lim)} px '
+                           f'(оригінал {round(max(wsrc))} px) — перенеси рядок або скороти')
                 break
     elif src:                   # порожній оригінал (коротка назва) — порівнювати нема з чим
         for a, b in zip(src.split('\n'), tr.split('\n')):
@@ -878,7 +927,7 @@ def check_entry(doc, e, ctx, terms=None, tagdict=None):
     return out
 
 
-def validate(work_dir, backup_dir=None, terms=None, widths=None):
+def validate(work_dir, backup_dir=None, terms=None, widths=None, rows=None):
     """[(source, id, попередження)]; terms — глосарій (glossary.load), щоб ловити
     рядки, де термін в оригіналі є, а його перекладу немає."""
     warn = []
@@ -888,7 +937,7 @@ def validate(work_dir, backup_dir=None, terms=None, widths=None):
     tagdict = tags.build_dict(files) if any(s.startswith('parameter/') for s, _ in files) else None
     docs = [d for d in (locfile.load_json(p) for p in sorted(locfile.walk(work_dir))) if d]
     docs = [d for d in docs if d.get('format') != 'atlas']
-    ctx = limits(docs, backup_dir or _backup_of(work_dir), os.path.dirname(os.path.abspath(work_dir)), widths)
+    ctx = limits(docs, backup_dir or _backup_of(work_dir), os.path.dirname(os.path.abspath(work_dir)), widths, rows)
     for doc in docs:
         for e in doc['entries']:
             if not e.get('tr'):

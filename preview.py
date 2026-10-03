@@ -62,10 +62,44 @@ class GameFont:
         return self.scheme.plain(self.code_re.sub('', line))
 
 
+def game_font(game, backup_dir, font='msg'):
+    """Шрифт гри для прев'ю: FFU Compile Heart (GameFont) або TMP Unity (unity/tmpgame)."""
+    if metrics._profile(game) is not None:
+        return GameFont(game, backup_dir, font)
+    path = metrics.unity_bundle(game, backup_dir) if font == 'msg' else None
+    if path is None:
+        raise ValueError('шрифт цієї гри не розібрано')
+    from unity import tmpgame
+    got = tmpgame.load(path)
+    if got is None:
+        raise ValueError('у шрифті гри немає кирилиці')
+    return tmpgame.TmpGameFont(*got)
+
+
+def _advance(font, s):
+    return sum((font.glyph(c) or (font.cell_h // 2, None))[0] for c in font.clean(s))
+
+
+def _wrap(font, line, limit):
+    """Перенос за словами в межу — як TMP (font.wraps)."""
+    out, cur = [], ''
+    for word in line.split(' '):
+        cand = word if not cur else cur + ' ' + word
+        if cur and _advance(font, cand) > limit:
+            out.append(cur)
+            cur = word
+        else:
+            cur = cand
+    return out + [cur]
+
+
 def render(font, text, limit, max_lines=None, name=None, dialog=False):
-    """Картинка напису. limit — межа ширини в px (None — без межі).
+    """Картинка напису. limit — межа ширини в px (None — без межі). Шрифт, що переносить
+    слова сам (TMP: font.wraps), — рядки переносяться в межу, як у грі.
     Повертає (Image RGB, [попередження, видимі на картинці])."""
     lines = (text or '').split('\n')
+    if getattr(font, 'wraps', False) and limit:
+        lines = [p for l in lines for p in _wrap(font, l, limit)]
     lh = font.cell_h + 4
     width = max([limit or 0] + [sum((font.glyph(c) or (font.cell_h // 2, None))[0]
                                     for c in font.clean(l)) for l in lines])

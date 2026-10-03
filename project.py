@@ -27,6 +27,8 @@ import sheets
 STORE = 'переклад.json'
 _CODES = re.compile(r'#[A-Za-z]+(?:\[[^\]]*\])?|%[-+0#]*\d*(?:\.\d+)?(?:ll|l|h)?[a-zA-Z%]|<[A-Z]+>|\{[^}]*\}')
 _WORD = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
+_WORD_EN = re.compile(r'[A-Za-z]{2,}')        # англійське слово (після заміни ще не перекладено)
+_TAG = re.compile(r'<[^<>]*>')                # теги тексту (Crystar <CHARA=…>, UE <i>) — не слова
 
 # японські символи: розділові 、。「」…, кана, ієрогліфи, повноширинні знаки й літери (ＳＬＧ),
 # півширинна катакана; пробіл повної ширини U+3000 — ні
@@ -212,6 +214,49 @@ class Project:
         self._names_changed(keys)
         return changed
 
+    # ------------------------------------------------------------ замінити всюди
+    def replace_plan(self, rows, find, repl, words=True, case=True, fill_empty=True,
+                     in_tr=True, only_clean=True):
+        """Що зробить «Замінити всюди» (фрагмент оригіналу -> його переклад) у рядках `rows`:
+        [(ключ, старий переклад, новий)] — по одному на групу пов'язаних (переклад іде в усі).
+          fill_empty — перекладу ще немає, а в оригіналі є фрагмент: переклад = оригінал із
+                       заміною («Склад Авенір №2» з «Avenir Warehouse №2»);
+          only_clean — так лише тоді, коли після заміни не лишилось англійських слів;
+          in_tr      — фрагмент лишився в готовому перекладі — замінити там.
+        «Не перекладати» і службові ключі не чіпаємо."""
+        if not find:
+            return []
+        flags = 0 if case else re.IGNORECASE
+        rx = re.compile((r'(?<!\w)' + re.escape(find) + r'(?!\w)') if words else re.escape(find), flags)
+        sub = lambda s: rx.sub(lambda _m: repl, s)
+        plan, seen = [], set()
+        for r in rows:
+            if r['kind'] == 'key' or r.get('лишити') or not r['e']['src']:
+                continue
+            u = self.uniq_key(r)
+            if u in seen:
+                continue
+            seen.add(u)
+            src, tr = r['e']['src'], r['e'].get('tr', '')
+            if tr:
+                if in_tr and rx.search(tr):
+                    new = sub(tr)
+                    if new != tr:
+                        plan.append((r['k'], tr, new))
+            elif fill_empty and rx.search(src):
+                new = sub(src)
+                if only_clean and _WORD_EN.search(_TAG.sub(' ', _CODES.sub(' ', new))):
+                    continue
+                plan.append((r['k'], '', new))
+        return plan
+
+    def apply_plan(self, plan, undo=False):
+        """Записати план replace_plan (undo=True — повернути старі переклади). -> змінені ключі."""
+        changed = []
+        for k, old, new in plan:
+            changed += self.set_tr(k, old if undo else new)
+        return changed
+
     # ------------------------------------------------------------ групи
     def groups(self):
         return self.meta['групи']
@@ -323,21 +368,69 @@ class Project:
             n = r['_ja'] = ja_count(r['e'].get('ja'))
         return n
 
+    @staticmethod
+    def uniq_key(r):
+        """Чим рядок «один» серед повторів: пов'язані однакові рядки перекладаються раз
+        (переклад іде в усі), відв'язаний — окремою роботою."""
+        if r.get('окремо') or not r['e']['src']:
+            return r['k']
+        return (r['kind'], r['e']['src'])
+
     def stats(self, rows):
-        """{'rows', 'done', 'words', 'words_done'} для набору рядків (лише ті, що рахуються)."""
+        """{'rows', 'done', 'words', 'words_done', 'ja', 'ja_done'} для набору рядків (лише ті,
+        що рахуються) + те саме без повторів: 'uniq', 'uniq_done', 'uniq_words'… — обсяг
+        роботи, коли однаковий рядок перекладається один раз (так рахують ціну)."""
         rows = [r for r in rows if self.counted(r)]
         done = [r for r in rows if r['e'].get('tr')]
+        seen, uniq = set(), []
+        for r in rows:
+            u = self.uniq_key(r)
+            if u not in seen:
+                seen.add(u)
+                uniq.append(r)
+        udone = [r for r in uniq if r['e'].get('tr')]
         return {'rows': len(rows), 'done': len(done),
                 'words': sum(map(self.words, rows)), 'words_done': sum(map(self.words, done)),
-                'ja': sum(map(self.ja_chars, rows)), 'ja_done': sum(map(self.ja_chars, done))}
+                'ja': sum(map(self.ja_chars, rows)), 'ja_done': sum(map(self.ja_chars, done)),
+                'uniq': len(uniq), 'uniq_done': len(udone),
+                'uniq_words': sum(map(self.words, uniq)), 'uniq_words_done': sum(map(self.words, udone)),
+                'uniq_ja': sum(map(self.ja_chars, uniq)), 'uniq_ja_done': sum(map(self.ja_chars, udone))}
+
+    def hidden(self, rows):
+        """Що не йде в прогрес: {'key': службові ключі, 'keep': «не перекладати»,
+        'empty': порожній оригінал} — кожне {'rows', 'words', 'ja'}."""
+        out = {w: {'rows': 0, 'words': 0, 'ja': 0} for w in ('key', 'keep', 'empty')}
+        for r in rows:
+            if self.counted(r):
+                continue
+            w = 'key' if r['kind'] == 'key' else 'empty' if not r['e']['src'] else 'keep'
+            d = out[w]
+            d['rows'] += 1
+            d['words'] += self.words(r)
+            d['ja'] += self.ja_chars(r)
+        return out
+
+    def dup_rows(self, rows=None):
+        """Рядки, що мають однакові (×N), — групами повторів поспіль (у порядку першої появи)."""
+        rows = self.rows if rows is None else rows
+        groups = collections.OrderedDict()
+        for r in rows:
+            # імена мовців у дереві й так по одному (books), службові ключі не перекладають
+            if r['kind'] in ('key', 'name') or not r['e']['src'] or len(self.twins(r['k'])) < 2:
+                continue
+            groups.setdefault(self.lk(r['k']), []).append(r)
+        return [r for g in groups.values() for r in g]
 
     def progress(self):
         """Як sheets.progress: по «книгах» (імена — кожне один раз; службові ключі не рахуються)."""
         books = []
         done = total = words = words_done = ja = ja_done = 0
+        everything = []
         for name, scenes in self.books().items():
             # порожній оригінал (коротка назва) і «не перекладати» — у відсоток не йдуть
-            st = self.stats([r for rs in scenes.values() for r in rs])
+            rows = [r for rs in scenes.values() for r in rs]
+            everything += rows
+            st = self.stats(rows)
             if not st['rows']:
                 continue
             books.append({'book': name, 'done': st['done'], 'total': st['rows'], 'auto': 0,
@@ -348,8 +441,13 @@ class Project:
             words_done += st['words_done']
             ja += st['ja']
             ja_done += st['ja_done']
+        # без повторів — по всій грі (той самий рядок у різних книгах — теж повтор)
+        st = self.stats(everything)
         return {'books': books, 'done': done, 'total': total, 'auto': 0, 'prev': None,
-                'words': words, 'words_done': words_done, 'ja': ja, 'ja_done': ja_done}
+                'words': words, 'words_done': words_done, 'ja': ja, 'ja_done': ja_done,
+                'uniq': {k[5:]: v for k, v in st.items() if k.startswith('uniq_')} | {
+                    'rows': st['uniq'], 'done': st['uniq_done']},
+                'hidden': self.hidden(everything)}
 
     # ------------------------------------------------------------ зберігання
     def save(self):

@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.9'
+VERSION = '2.10'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -883,9 +883,7 @@ class App(tk.Tk):
         try:
             known = json.load(open(p, encoding='utf-8')).get(g) or {}
         except (OSError, ValueError):
-            return []
-        if not known:
-            return []
+            known = {}
         import common
         bk_root, dest = self.dirs()[3], self.data_dir()
         bad = []
@@ -907,6 +905,55 @@ class App(tk.Tk):
                     bad.append(rel)
             elif os.path.exists(gm) and not g_ok:
                 bad.append(rel)          # копії немає, а в грі вже змінений файл
+        # решта резервних копій (відбитків немає: сцени й таблиці Crystar тощо) — за
+        # слідами перекладу. Crystar: копія parameter з перекладом давала українське
+        # в колонці «Японська». Копії не змінюються — вердикт кешуємо (кеш\)
+        cache_p = os.path.join(HERE, 'кеш', f'оригінали_{g}.json')
+        try:
+            cache = json.load(open(cache_p, encoding='utf-8'))
+        except (OSError, ValueError):
+            cache = {}
+        seen = {}
+        for dp, _d, fs in os.walk(bk_root) if os.path.isdir(bk_root) else ():
+            for fn in fs:
+                bk = os.path.join(dp, fn)
+                rel = os.path.relpath(bk, bk_root).replace(os.sep, '/')
+                if rel in known:
+                    continue
+                st = os.stat(bk)
+                sig = [st.st_size, int(st.st_mtime)]
+                hit = cache.get(rel)
+                if hit and hit[:2] == sig:
+                    patched = hit[2]
+                else:
+                    try:
+                        patched = common.looks_patched(bk)
+                    except Exception:
+                        patched = None
+                seen[rel] = sig + [patched]
+                if not patched:
+                    continue
+                gm = os.path.join(dest, *rel.split('/'))
+                try:
+                    g_ok = os.path.exists(gm) and common.looks_patched(gm) is False
+                except Exception:
+                    g_ok = False
+                if g_ok and fix:
+                    self.say(f'  резервна копія {rel} не була оригіналом — '
+                             f'замінюю чистим файлом з теки гри', 'warn')
+                    shutil.copy2(gm, bk + '.new')
+                    os.replace(bk + '.new', bk)
+                    st = os.stat(bk)
+                    seen[rel] = [st.st_size, int(st.st_mtime), False]
+                else:
+                    bad.append(rel)
+        if seen != cache:
+            try:
+                os.makedirs(os.path.dirname(cache_p), exist_ok=True)
+                with open(cache_p, 'w', encoding='utf-8') as f:
+                    json.dump(seen, f, ensure_ascii=False)
+            except OSError:
+                pass
         return bad
 
     def _require_originals(self):
@@ -1019,7 +1066,7 @@ class App(tk.Tk):
         self._require_originals()
         if not self._read_translation():
             raise RuntimeError('Перекладу ще немає — нема чого заливати.')
-        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl)), xl)
+        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl), rows=sheets.load_row_limits(xl)), xl)
         if warn:
             self.say(f'\nПопереджень: {len(warn)} (перші 10; клік — відкрити рядок, '
                      'правий клік — затвердити)', 'warn')
@@ -1125,6 +1172,12 @@ class App(tk.Tk):
         for dp, _d, fs in os.walk(out):
             for fn in fs:
                 files.append(os.path.join(dp, fn))
+        # Спершу — чи всі файли гри вільні. Гру щойно закрито, процесу вже немає, а Windows
+        # ще кілька секунд тримає файли (Crystar: «2» замінив текст, а uistatic зі шрифтом —
+        # ні: у грі українське без і є ґ і з широкими літерами). Зайнятий файл — чекаємо;
+        # не звільнився — зупиняємось, НІЧОГО не змінивши
+        self._wait_unlocked([os.path.join(dest, os.path.relpath(s, out)) for s in files])
+        done = []
         for k, src in enumerate(files, 1):
             self.step_nc(k, len(files), 'Копіюю у гру')
             rel = os.path.relpath(src, out)
@@ -1140,36 +1193,85 @@ class App(tk.Tk):
                 os.makedirs(os.path.dirname(keep), exist_ok=True)
                 shutil.copy2(dst, keep)
             tmp = dst + '.new'
-            try:
-                if _same_drive(src, dst):
-                    # той самий диск — просто переносимо готовий файл (миттєво,
-                    # без ще одного запису сотень МБ); out\ після цього не потрібен
-                    os.replace(src, dst)
-                else:
-                    shutil.copy2(src, tmp)           # інший диск — копія й підміна
-                    os.replace(tmp, dst)
-            except OSError as ex:
+            for attempt in range(10):
+                try:
+                    if _same_drive(src, dst):
+                        # той самий диск — просто переносимо готовий файл (миттєво,
+                        # без ще одного запису сотень МБ); out\ після цього не потрібен
+                        os.replace(src, dst)
+                    else:
+                        shutil.copy2(src, tmp)           # інший диск — копія й підміна
+                        os.replace(tmp, dst)
+                    break
+                except PermissionError:
+                    # файл на мить зайняв антивірус / Steam — ще раз за секунду
+                    if attempt < 9:
+                        time.sleep(1)
+                        continue
+                    ex = sys.exc_info()[1]
+                except OSError as e:
+                    ex = e
                 if os.path.exists(tmp):
                     try:
                         os.remove(tmp)
                     except OSError:
                         pass
+                half = (f'\nУВАГА: {len(done)} з {len(files)} файлів уже замінено ({", ".join(done[:5])}'
+                        f'{"…" if len(done) > 5 else ""}), а цей — ні: гра зараз наполовину перекладена '
+                        '(напр. текст новий, а шрифт старий — без і є ґ). Зачекай хвилину й натисни «2» '
+                        'ще раз або «Повернути оригінали гри».') if done else '\nУ теці гри нічого не змінено.'
                 raise RuntimeError(f'Не вдалося записати {rel}: {ex}\n'
-                                   'Можливо, гра зараз запущена — закрий її.')
+                                   'Файл зайнятий: гра ще закривається, її запущено знову або його '
+                                   'тримає інша програма (антивірус, Steam).' + half)
             self.say(f'  -> {rel}', 'dim')
+            done.append(rel)
             n += 1
         return n
+
+    def _wait_unlocked(self, paths, wait=30):
+        """Чекати (до `wait` с), поки файли гри можна відкрити на запис; ні — помилка до
+        будь-яких змін."""
+        t0 = time.time()
+        said = False
+        while True:
+            busy = []
+            for p in paths:
+                if not os.path.exists(p):
+                    continue
+                try:
+                    with open(p, 'r+b'):
+                        pass
+                except PermissionError:
+                    busy.append(p)
+                except OSError:
+                    pass
+            if not busy:
+                return
+            if time.time() - t0 > wait:
+                names = ', '.join(os.path.basename(p) for p in busy[:5])
+                raise RuntimeError(f'Файли гри зайняті: {names}. Гра ще закривається, її запущено '
+                                   'знову або файли тримає інша програма (антивірус, Steam).\n'
+                                   'У теці гри нічого не змінено. Зачекай хвилину й натисни кнопку ще раз '
+                                   '(якщо не допоможе — перезавантаж комп\'ютер).')
+            if not said:
+                self.say(f'  файл гри ще зайнятий ({os.path.basename(busy[0])}) — чекаю, поки звільниться…',
+                         'warn')
+                self.set_status('Чекаю, поки гра відпустить файли…')
+                said = True
+            time.sleep(1)
 
     def do_restore(self):
         _w, _x, _o, bk = self.dirs()
         self._require_closed()
         if not os.path.isdir(bk):
             raise RuntimeError('Резервних копій немає.')
+        self._require_originals()       # інакше «повернемо» в гру перекладений файл
         dest, n = self.data_dir(), 0
         files = []
         for dp, _d, fs in os.walk(bk):
             for fn in fs:
                 files.append(os.path.join(dp, fn))
+        self._wait_unlocked([os.path.join(dest, os.path.relpath(s, bk)) for s in files])
         for k, src in enumerate(files, 1):
             self.step_nc(k, len(files), 'Повертаю оригінали')
             dst = os.path.join(dest, os.path.relpath(src, bk))
@@ -1260,6 +1362,24 @@ class App(tk.Tk):
             n = lambda v: f'{v:,}'.replace(',', ' ')
             self.say(f'Японською (знаки без пробілів): {n(pr["ja"])} знаків, з них перекладено '
                      f'{n(pr["ja_done"])} ({jp:.1f}%).', 'mono')
+        if pr.get('uniq'):                   # редактор: обсяг без повторів (для ціни перекладу)
+            n = lambda v: f'{v:,}'.replace(',', ' ')
+            u = pr['uniq']
+            line = (f'Без повторів (однаковий рядок — один раз): {n(u["rows"])} рядків, '
+                    f'{n(u["words"])} слів')
+            if u.get('ja'):
+                line += f', {n(u["ja"])} японських знаків'
+            line += f'; перекладено {n(u["done"])} рядків, {n(u["words_done"])} слів'
+            if u.get('ja'):
+                line += f', {n(u["ja_done"])} знаків'
+            self.say(line + '.', 'mono')
+            h = pr.get('hidden') or {}
+            parts = [f'{lab}: {n(h[w]["rows"])} рядків, {n(h[w]["words"])} слів'
+                     + (f', {n(h[w]["ja"])} яп. знаків' if h[w]['ja'] else '')
+                     for w, lab in (('keep', '«не перекладати»'), ('key', 'службові ключі'),
+                                    ('empty', 'порожній оригінал')) if h.get(w, {}).get('rows')]
+            if parts:
+                self.say('Не рахуються (приховано): ' + '; '.join(parts) + '.', 'mono')
         self._remember_pc(pr['done'], pr['total'])
         pc = 100 * pr['done'] / pr['total'] if pr['total'] else 0
         self.set_status(f'Перекладено {pr["done"]}/{pr["total"]} ({pc:.1f}%).')
@@ -1275,7 +1395,7 @@ class App(tk.Tk):
         self._remember_pc(done, total)
         self.say(f'\nПерекладено {done} з {total} рядків '
                  f'({100 * done / total if total else 0:.1f}%).', 'head')
-        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl)), xl)
+        warn, hidden = sheets.split_approved(sheets.validate(work, terms=__import__('glossary').load(xl), widths=sheets.load_widths(xl), rows=sheets.load_row_limits(xl)), xl)
         if not warn:
             self.say('Попереджень немає — усе чисто.', 'ok')
         else:
