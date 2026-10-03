@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.7'
+VERSION = '2.9'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -325,6 +325,8 @@ class App(tk.Tk):
         self.b_rest = ttk.Button(row, text='Повернути оригінали гри',
                                  command=lambda: self._run(self.do_restore))
         self.b_rest.pack(side='left')
+        self.b_inst = ttk.Button(row, text='Створити інсталятор…', command=self.make_installer)
+        self.b_inst.pack(side='left', padx=(8, 0))
         self.b_report = ttk.Button(row, text='Повідомити про проблему…',
                                    command=lambda: self.open_feedback())
         self.b_report.pack(side='left', padx=8)
@@ -337,7 +339,7 @@ class App(tk.Tk):
                         command=self._save_sound).pack(side='right', padx=(0, 4))
 
         self.buttons = [self.b1, self.b2, self.b3, self.b_open, self.b_book, self.b_pics, self.b_editor,
-                        self.b_prog, self.b_check, self.b_rest,
+                        self.b_prog, self.b_check, self.b_rest, self.b_inst,
                         self.b_find, self.b_pick, self.b_scan]
 
         # --- стан --------------------------------------------------------
@@ -1040,6 +1042,8 @@ class App(tk.Tk):
         else:
             import translate_crystar as t
             ns.root, ns.slot = self.data_dir(), self.cur['slot']
+            self.settings['crystar_slot_in_game'] = ns.slot    # для інсталятора: яка мова в грі
+            save_settings(self.settings)
             self.say(f'Пишу переклад у {"англійський" if ns.slot == "en" else "японський"} слот — '
                      'у грі має стояти ця ж мова тексту.', 'dim')
         self._capture(lambda: t.cmd_import(ns, self.step))
@@ -1181,6 +1185,53 @@ class App(tk.Tk):
             n += 1
         self.set_status(f'Повернуто оригіналів: {n}.')
         self.say(f'Повернуто оригіналів: {n}.', 'ok')
+
+    def make_installer(self):
+        """«Створити інсталятор…»: шлях до zip питаємо тут (діалог — лише з головного потоку)."""
+        if self.busy:
+            return
+        g = self.game.get()
+        desk = os.path.join(os.path.expanduser('~'), 'Desktop')
+        path = filedialog.asksaveasfilename(
+            parent=self, title='Куди зберегти інсталятор перекладу',
+            initialdir=desk if os.path.isdir(desk) else HERE,
+            initialfile=f'{GAMES[g]["folder"]} — українська ({time.strftime("%Y-%m-%d")}).zip',
+            defaultextension='.zip', filetypes=[('Архів zip', '*.zip')])
+        if path:
+            self._run(lambda: self.do_installer(os.path.normpath(path)))
+
+    def do_installer(self, path):
+        """Переклад, що зараз у грі (після «2»), — у zip з «Встановити переклад.bat»."""
+        import installer
+        g = self.cur['game']
+        _w, _x, _o, bk = self.dirs()
+        root, dest = self.root_dir(), self.data_dir()
+        if not os.path.isdir(bk):
+            raise RuntimeError('У грі ще немає перекладу. Спершу натисни «2. Залити переклад у гру».')
+        game = dict(GAMES[g], data=os.path.relpath(dest, root) if dest != root else '')
+        # наші файли без оригіналу — ті самі, що _copy_into_game кладе без бекапу
+        extra = []
+        if os.path.exists(os.path.join(dest, 'ua_strings.bin')):      # MSK: рядки exe + патч
+            extra += ['ua_strings.bin', 'dinput8.dll']
+        note = ''
+        if g == 'crystar':      # мова тексту — налаштування самої гри, переклад лише в одному слоті
+            slot = self.settings.get('crystar_slot_in_game') or self.cur['slot']
+            note = ('У налаштуваннях гри має стояти мова тексту ' +
+                    ('English' if slot == 'en' else 'Japanese (日本語)') + ' — переклад записано замість неї.')
+        self.say(f'\nЗбираю інсталятор: {path}')
+        self.set_status('Збираю інсталятор…')
+        n, size = installer.build(path, game, dest, bk, extra, note, VERSION,
+                                  step=self.step, say=lambda t: self.say(t, 'dim'))
+        self.set_status(f'Інсталятор готовий: {human(size)}.')
+        self.say(f'Готово: файлів гри — {n}, розмір — {human(size)}.\n'
+                 'Цей zip можна надсилати: людина розпаковує його й запускає «Встановити переклад.bat» '
+                 '(гру скрипт знайде сам).', 'ok')
+        if note:
+            self.say('  ' + note, 'dim')
+        try:
+            subprocess.Popen(['explorer', '/select,', path])
+        except OSError:
+            pass
 
     def do_progress(self):
         import sheets
