@@ -791,4 +791,13 @@ class App(Core, tk.Tk):
 
 
 if __name__ == '__main__':
-    App().mainloop()
+    import core as _core
+    _holder = {}
+    _prev = _core.install_crash_log(lambda m: _holder['w'].say('\n!!! ' + m, 'err') if 'w' in _holder else None)
+    _app = _holder['w'] = App()
+    # помилки в обробниках Tk ідуть не в sys.excepthook — туди ж («чорна скринька», core.py)
+    _app.report_callback_exception = lambda et, ev, tb: sys.excepthook(et, ev, tb)
+    if _prev:
+        _app.say(f'Попередній запуск програми закрився не як звичайно. Що сталося — у файлі '
+                 f'«{os.path.basename(_prev)}» у теці програми: надішли його разом з лог.txt.', 'warn')
+    _app.mainloop()

@@ -864,7 +864,14 @@ def main():
     os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
     sys.path.insert(0, HERE)
     app = QApplication.instance() or QApplication(sys.argv)
+    holder = {}                         # вікна ще немає, а помилка вже може статися
+    prev = core.install_crash_log(lambda m: holder['w'].say('\n!!! ' + m, 'err') if 'w' in holder else None)
     win = MainWindow()
+    holder['w'] = win
+    if prev:
+        win.say(f'Попередній запуск програми закрився не як звичайно (вилетів чи його закрили примусово). '
+                f'Що сталося — у файлі «{os.path.basename(prev)}» у теці програми: надішли його разом з '
+                'лог.txt через «Повідомити про проблему…».', 'warn')
     win.show()
     return app.exec()
 

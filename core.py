@@ -11,7 +11,7 @@ _after(мс, функція). Методи Core працюють і з фоно�
 """
 import os, re, sys, json, time, shutil, threading, traceback, subprocess, queue
 os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyxl) інакше резервує ~30 МБ на кожне ядро
-VERSION = '3.1'
+VERSION = '3.1.1'
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 SETTINGS = os.path.join(HERE, 'settings.json')
@@ -160,6 +160,82 @@ def running(exe):
         return False
 
 
+# ------------------------------------------------------------- «чорна скринька» (з 3.1)
+CRASHFILE = os.path.join(HERE, 'збій.txt')
+_crash_f = None
+
+
+def _environment():
+    """Версії для заголовка журналу: Python, PySide6 (якщо вже завантажено), Windows."""
+    import platform
+    qt = sys.modules.get('PySide6')
+    return (f'Python {platform.python_version()}' + (f' · PySide6 {qt.__version__}' if qt else '')
+            + f' · {platform.platform()}')
+
+
+def install_crash_log(notify=None):
+    """Щоб виліт програми лишав слід (раніше — нічого: перекладач не міг сказати, що сталося):
+      - неперехоплена помилка (у вікні чи у фоновому потоці) -> повний стек у лог.txt, і notify(текст)
+        — вікно показує коротко в журналі;
+      - падіння самого процесу (UnityPy, пам'ять…) -> faulthandler пише стек усіх потоків у збій.txt.
+    збій.txt живе, поки програма відкрита, і зникає при звичайному закритті; лишився з минулого
+    разу — програма закрилась не як звичайно: перейменовуємо з датою, повертаємо нову назву."""
+    global _crash_f
+    import atexit, faulthandler
+    prev = None
+    if os.path.exists(CRASHFILE):
+        prev = os.path.join(HERE, time.strftime('збій %Y-%m-%d %H-%M.txt',
+                                                time.localtime(os.path.getmtime(CRASHFILE))))
+        try:
+            os.replace(CRASHFILE, prev)
+        except OSError:
+            prev = CRASHFILE
+    try:
+        _crash_f = open(CRASHFILE, 'w', encoding='utf-8')
+        _crash_f.write(f'KitsuneLoc {VERSION}, запуск {time.strftime("%Y-%m-%d %H:%M:%S")} · {_environment()}\n'
+                       'Цей файл зникає, коли програму закривають як звичайно. Якщо він лишився — програма '
+                       'вилетіла; нижче (якщо є) — де саме.\n\n')
+        _crash_f.flush()
+        faulthandler.enable(file=_crash_f, all_threads=True)
+    except OSError:
+        _crash_f = None
+
+    def closed_normally():
+        global _crash_f
+        if _crash_f is None:
+            return
+        try:
+            faulthandler.disable()
+            _crash_f.close()
+            os.remove(CRASHFILE)
+        except OSError:
+            pass
+        _crash_f = None
+    atexit.register(closed_normally)
+
+    def log_exc(where, et, ev, tb):
+        text = ''.join(traceback.format_exception(et, ev, tb))
+        try:
+            with open(LOGFILE, 'a', encoding='utf-8') as f:
+                f.write(f'\n!!! {time.strftime("%Y-%m-%d %H:%M:%S")} {where}:\n{text}\n')
+        except OSError:
+            pass
+        if sys.__stderr__ is not None:
+            try:
+                sys.__stderr__.write(text)
+            except Exception:                           # noqa: BLE001
+                pass
+        if notify is not None:
+            try:
+                notify(f'{where}: {ev!r} — повний опис записано в лог.txt')
+            except Exception:                           # noqa: BLE001
+                pass
+    sys.excepthook = lambda et, ev, tb: log_exc('Неперехоплена помилка', et, ev, tb)
+    threading.excepthook = lambda a: log_exc(
+        f'Помилка в потоці {getattr(a.thread, "name", "")}', a.exc_type, a.exc_value, a.exc_traceback)
+    return prev
+
+
 def human(n):
     for unit in ('Б', 'КБ', 'МБ', 'ГБ'):
         if n < 1024 or unit == 'ГБ':
@@ -269,7 +345,7 @@ class Core:
                 open(LOGFILE, 'w', encoding='utf-8').close()
             self.logf = open(LOGFILE, 'a', encoding='utf-8')
             self.logf.write(f'\n===== {time.strftime("%Y-%m-%d %H:%M:%S")} '
-                            f'KitsuneLoc {VERSION} =====\n')
+                            f'KitsuneLoc {VERSION} · {_environment()} =====\n')
             self.logf.flush()
         except OSError:
             self.logf = None

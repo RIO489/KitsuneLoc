@@ -175,8 +175,8 @@ def _unity_patched(path):
                     return True
             except ValueError:
                 pass
-        # \u0440\u044f\u0434\u043a\u0438 \u0442\u0430\u0431\u043b\u0438\u0446\u044c \u0456 \u0441\u0446\u0435\u043d: \u0443 \u0440\u0435\u0437\u0435\u0440\u0432\u043d\u0456\u0439 \u043a\u043e\u043f\u0456\u0457 parameter \u0437 \u043f\u0435\u0440\u0435\u043a\u043b\u0430\u0434\u043e\u043c \u044f\u043f\u043e\u043d\u0441\u044c\u043a\u0430
-        # \u043a\u043e\u043b\u043e\u043d\u043a\u0430 \u043f\u043e\u043a\u0430\u0437\u0443\u0432\u0430\u043b\u0430 \u0443\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0435 (\u043a\u043e\u043f\u0456\u044e \u0437\u0440\u043e\u0431\u043b\u0435\u043d\u043e \u0437 \u0443\u0436\u0435 \u043f\u0435\u0440\u0435\u043a\u043b\u0430\u0434\u0435\u043d\u043e\u0457 \u0433\u0440\u0438)
+        # рядки таблиць і сцен: у резервній копії parameter з перекладом японська
+        # колонка показувала українське (копію зроблено з уже перекладеної гри)
         if any(cyr(s) for _p, _l, s in scan(o.get_raw_data())):
             return True
     from unity import tmplayout
