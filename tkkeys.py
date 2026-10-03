@@ -38,7 +38,10 @@ def _menu(ev):
     m.add_separator()
     m.add_command(label='Виділити все', command=lambda: w.event_generate('<<SelectAll>>'))
     # вікно може додати свої пункти полю: w.kl_menu = [(підпис, функція), ...]
+    # або функція (подія) -> такий список (пункти залежать від місця кліку)
     extra = getattr(w, 'kl_menu', None)
+    if callable(extra):
+        extra = extra(ev)
     if extra:
         m.add_separator()
         for label, fn in extra:

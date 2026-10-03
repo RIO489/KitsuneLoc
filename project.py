@@ -214,6 +214,59 @@ class Project:
         self._names_changed(keys)
         return changed
 
+    # ------------------------------------------------------------ схожі перекладені (з 2.11)
+    _SIM_WORD = re.compile(r'[^\W_]{3,}')
+
+    def _sim_words(self, s):
+        return set(w.lower() for w in self._SIM_WORD.findall(_TAG.sub(' ', _CODES.sub(' ', s or ''))))
+
+    def similar(self, k, n=3, min_ratio=0.75):
+        """Схожі (не однакові) рядки, які вже перекладено: [(схожість 0..1, ключ)] — як
+        «пам'ять перекладів» у Crowdin: «Avenir Warehouse №2» підкаже переклад «№4».
+        Кандидати — за спільними словами (індекс), далі difflib по всьому оригіналу."""
+        import difflib
+        r = self.by_key[k]
+        src = r['e']['src']
+        words = self._sim_words(src)
+        if not src or not words:
+            return []
+        idx = self.__dict__.get('_sim_idx')
+        if idx is None:                         # слово -> ключі (по одному на групу однакових)
+            idx, seen = collections.defaultdict(list), set()
+            for x in self.rows:
+                if x['kind'] == 'key' or not x['e']['src']:
+                    continue
+                u = (x['kind'], x['e']['src'])
+                if u in seen:
+                    continue
+                seen.add(u)
+                for w in self._sim_words(x['e']['src']):
+                    idx[w].append(x['k'])
+            self._sim_idx = idx
+        hits = collections.Counter()
+        for w in words:
+            lst = idx.get(w, ())
+            if len(lst) < 3000:                 # «the», «you» — не відбирають кандидатів
+                hits.update(lst)
+        out, seen_src = [], {src}
+        sm = difflib.SequenceMatcher(None, '', src, autojunk=False)
+        for x, _c in hits.most_common(200):
+            e = self.by_key[x]['e']
+            if e['src'] in seen_src:
+                continue
+            tr = self.tr(x) or next((self.tr(t) for t in self.twins(x) if self.tr(t)), '')
+            if not tr:
+                continue
+            seen_src.add(e['src'])
+            sm.set_seq1(e['src'])
+            if sm.quick_ratio() < min_ratio:
+                continue
+            ratio = sm.ratio()
+            if ratio >= min_ratio:
+                out.append((ratio, next((t for t in self.twins(x) if self.tr(t)), x)))
+        out.sort(key=lambda p: -p[0])
+        return out[:n]
+
     # ------------------------------------------------------------ замінити всюди
     def replace_plan(self, rows, find, repl, words=True, case=True, fill_empty=True,
                      in_tr=True, only_clean=True):

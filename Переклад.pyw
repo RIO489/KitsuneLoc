@@ -11,7 +11,7 @@ os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')   # numpy (через openpyx
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
-VERSION = '2.10'
+VERSION = '2.11'
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -1743,8 +1743,8 @@ class App(tk.Tk):
         self.say(f'  переклад тепер у файлі {project.store_path(xl)}', 'dim')
         self.q.put(('call', lambda: (self._refresh_editor_hint(), self.open_editor())))
 
-    def open_pics(self):
-        """Вікно перекладу написів на картинках з живим прев'ю."""
+    def open_pics(self, goto=None):
+        """Вікно перекладу написів на картинках з живим прев'ю (goto — ключ напису, з редактора)."""
         self._snap()
         if self.cur['game'] not in ('msk', 'nep'):
             messagebox.showinfo('Немає написів',
@@ -1767,7 +1767,9 @@ class App(tk.Tk):
             import atlas_editor
             import importlib
             importlib.reload(atlas_editor)
-            atlas_editor.Editor(self)
+            win = atlas_editor.Editor(self)
+            if goto:
+                win.goto(goto)
         except Exception as e:
             messagebox.showerror('Написи на картинках', str(e))
 

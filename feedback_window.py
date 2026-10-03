@@ -158,7 +158,40 @@ class FeedbackWindow(tk.Toplevel):
         t.pack(fill='x', pady=(2, 0))
         # Tab — до наступного поля, а не символ табуляції
         t.bind('<Tab>', lambda e: (e.widget.tk_focusNext().focus_set(), 'break')[1])
+        self._grip(f, t, c)
         return t
+
+    def _grip(self, parent, t, c):
+        """Ручка під полем (прохання перекладача): тягни — вище/нижче поле, а вікно росте разом
+        з ним, щоб знімки й кнопки не сховались за край екрана."""
+        import tkinter.font as tkfont
+        g = tk.Frame(parent, height=9, cursor='sb_v_double_arrow', bg=c['bg'])
+        bar = tk.Frame(g, height=3, width=70, cursor='sb_v_double_arrow', bg=c['dim'])
+        bar.place(relx=0.5, rely=0.5, anchor='center')
+        g.pack(fill='x', pady=(1, 0))
+        st = {}
+
+        def press(ev):
+            st.update(y=ev.y_root, h=int(t.cget('height')),
+                      lh=max(8, tkfont.Font(font=t.cget('font')).metrics('linespace')))
+
+        def drag(ev):
+            if 'y' not in st:
+                return
+            h = max(2, min(40, st['h'] + round((ev.y_root - st['y']) / st['lh'])))
+            old = int(t.cget('height'))
+            if h == old:
+                return
+            t.configure(height=h)
+            # вікно — на ту саму різницю, але не вище за екран
+            W, H = self.winfo_width(), self.winfo_height()
+            H = max(self.minsize()[1], min(self.winfo_screenheight() - 80, H + (h - old) * st['lh']))
+            self.geometry(f'{W}x{H}')
+
+        for w in (g, bar):
+            w.bind('<ButtonPress-1>', press)
+            w.bind('<B1-Motion>', drag)
+            w.bind('<ButtonRelease-1>', lambda _e: st.pop('y', None))
 
     # ------------------------------------------------------------------ знімки
     def _fill_shots(self):

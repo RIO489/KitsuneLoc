@@ -181,8 +181,17 @@ class Editor(tk.Toplevel):
         self.q_var = tk.StringVar()
         # не розтягується з вікном: у темі sv-ttk кожне розтягування поля — дороге перемальовування
         self.search = ttk.Entry(top, textvariable=self.q_var, width=28)
-        self.search.pack(side='left', padx=6)
+        self.search.pack(side='left', padx=(6, 2))
         self.q_var.trace_add('write', lambda *_: self._later('filter', 300, self._refill))
+        # наступний / попередній збіг пошуку (прохання перекладача): Enter / Shift+Enter, F3
+        ttk.Button(top, text='▲', width=2, command=lambda: self._hit(-1)).pack(side='left')
+        ttk.Button(top, text='▼', width=2, command=lambda: self._hit(1)).pack(side='left', padx=(2, 0))
+        self.hit_info = tk.StringVar()
+        ttk.Label(top, textvariable=self.hit_info, style='Hint.TLabel', width=11).pack(side='left', padx=(4, 0))
+        self.search.bind('<Return>', lambda e: self._hit(1))
+        self.search.bind('<Shift-Return>', lambda e: self._hit(-1))
+        self.bind('<F3>', lambda e: self._hit(1))
+        self.bind('<Shift-F3>', lambda e: self._hit(-1))
         ttk.Label(top, text='Показати:').pack(side='left', padx=(10, 4))
         self.flt = tk.StringVar(value=FILTERS[0])
         cb = ttk.Combobox(top, textvariable=self.flt, values=FILTERS, state='readonly', width=16)
@@ -288,6 +297,18 @@ class Editor(tk.Toplevel):
         # права кнопка в полях: виділений фрагмент -> «Замінити всюди» (tkkeys.kl_menu)
         for t in (self.src_text, self.tr_text):
             t.kl_menu = [('Замінити всюди…  (Ctrl+H)', lambda t=t: self._replace_all(t))]
+        # теги-посилання (<CHARA=…>) в оригіналі й японській — жовтим словом (tagrefs)
+        self._refs = None
+        for t in (self.src_text, self.ja_text):
+            t.ref_map = {}
+            t.tag_configure('ref', foreground=c.get('warn', '#e3b341'), underline=True)
+            t.tag_bind('ref', '<Enter>', lambda e, t=t: self._ref_tip(t, e))
+            t.tag_bind('ref', '<Motion>', lambda e, t=t: self._ref_tip(t, e))
+            t.tag_bind('ref', '<Leave>', lambda e: self._ref_tip_hide())
+            t.tag_bind('ref', '<Button-1>', lambda e, t=t: self._ref_copy(t, e))
+        self.src_text.kl_menu = lambda ev: (
+            [('Замінити всюди…  (Ctrl+H)', lambda: self._replace_all(self.src_text))] + self._ref_menu(self.src_text, ev))
+        self.ja_text.kl_menu = lambda ev: self._ref_menu(self.ja_text, ev)
 
         lk = ttk.Frame(right)
         lk.pack(fill='x', pady=(4, 0))
@@ -296,6 +317,8 @@ class Editor(tk.Toplevel):
         self.b_link = ttk.Button(lk, text='', command=self._toggle_link)
         self.b_link.pack(side='right')
         self.b_places = ttk.Button(lk, text='Усі місця…', command=self._places)
+        # напис на картинці — у вікно написів, одразу на цей напис (прохання перекладача)
+        self.b_atlas = ttk.Button(lk, text='Відкрити у вікні написів…', command=self._open_atlas)
 
         nf = ttk.Frame(right)
         nf.pack(fill='x', pady=(6, 0))
@@ -312,6 +335,19 @@ class Editor(tk.Toplevel):
         ttk.Label(right, text='Терміни в рядку (клік — вставити переклад)').pack(anchor='w', pady=(8, 0))
         self.terms_box = ttk.Frame(right)
         self.terms_box.pack(fill='x')
+        # схожі вже перекладені рядки — як пам'ять перекладів у Crowdin (Project.similar)
+        self.sim_lbl = ttk.Label(right, text='Схожі вже перекладені (клік — взяти переклад в поле)')
+        self.sim_box = ttk.Frame(right)
+        # картинки, прикріплені до слова чи рядка (pins.py): як виглядає предмет, монстр…
+        pf = ttk.Frame(right)
+        pf.pack(fill='x', pady=(8, 0))
+        ttk.Label(pf, text='Картинки').pack(side='left')
+        self.b_pin = ttk.Button(pf, text='Прикріпити картинку…', command=self._pin_add)
+        self.b_pin.pack(side='left', padx=8)
+        self.b_pin_hidden = ttk.Button(pf, text='', command=self._pin_toggle_hidden)
+        self.pins_box = ttk.Frame(right)
+        self.pins_box.pack(fill='x')
+        self._pins, self._pin_hidden_mode, self.pin_photos = None, False, []
 
         self.pic_title = tk.StringVar(value='Як у грі')
         ttk.Label(right, textvariable=self.pic_title).pack(anchor='w', pady=(8, 0))
@@ -660,6 +696,7 @@ class Editor(tk.Toplevel):
         self.view = rows
         self.list.delete(*self.list.get_children())
         self._count(rows)
+        self._hit_info()
         if not rows:
             self.cur = None
             self._show_row()
@@ -765,6 +802,44 @@ class Editor(tk.Toplevel):
         self.cur = k
         self._show_row()
 
+    def _hit(self, d):
+        """До наступного (d=1) / попереднього (-1) рядка зі збігом пошуку — по колу; фокус
+        лишається, де був (Enter у пошуку — ще раз далі)."""
+        items = self.list.get_children()
+        if not items:
+            return 'break'
+        self._commit()
+        iid = str(self.pr.by_key[self.cur]['n']) if self.cur else None
+        k = items.index(iid) if iid in items else (-1 if d > 0 else 0)
+        nxt = items[(k + d) % len(items)]
+        self.list.selection_set(nxt)
+        self.list.focus(nxt)
+        self.list.see(nxt)
+        return 'break'
+
+    def _hit_info(self):
+        """«3 / 232» біля пошуку і підсвітка знайденого в полях рядка."""
+        q = self.q_var.get().strip()
+        view = getattr(self, 'view', None)
+        if not q or not view:
+            self.hit_info.set('')
+        else:
+            pos = next((i for i, r in enumerate(view, 1) if r['k'] == self.cur), None)
+            self.hit_info.set(f'{pos or "–"} / {len(view)}')
+        for t in (self.src_text, self.ja_text, self.tr_text):
+            t.tag_remove('hit', '1.0', 'end')
+            if not q:
+                continue
+            t.tag_configure('hit', background=self.c.get('warn', '#e3b341'), foreground='#000000')
+            start = '1.0'
+            while True:
+                pos = t.search(q, start, 'end', nocase=True)
+                if not pos:
+                    break
+                end = f'{pos}+{len(q)}c'
+                t.tag_add('hit', pos, end)
+                start = end
+
     def _step(self, d):
         self._commit()
         items = self.list.get_children()
@@ -819,6 +894,7 @@ class Editor(tk.Toplevel):
                 self.tr_count.set('')
                 self.b_link.pack_forget()
                 self.b_places.pack_forget()
+                self.b_atlas.pack_forget()
                 return
             r = self.pr.by_key[k]
             e = r['e']
@@ -827,8 +903,10 @@ class Editor(tk.Toplevel):
             self.head.set(kind or (who or r['scene']))
             self.where.set(f'{r["book"]} · {r["scene"]} · {r["source"]} [{e["id"]}]')
             self._set_text(self.src_text, e['src'])
+            self._decorate(self.src_text, e['src'], 'en')
             if e.get('ja'):
                 self._set_text(self.ja_text, e['ja'])
+                self._decorate(self.ja_text, e['ja'], 'ja')
                 self.ja_head.set(f'Японська · {chars_word(project.ja_count(e["ja"]))} (без пробілів)')
                 if not getattr(self, '_ja_shown', False):
                     self.ja_lbl.pack(anchor='w', pady=(4, 0), after=self.src_grip)
@@ -847,12 +925,19 @@ class Editor(tk.Toplevel):
                 self._text_for = k          # для якого рядка зараз текст у полі (див. _commit)
             self.note.set(e.get('note', ''))
             self._link_state()
+            if self.pr.docs[r['source']][1].get('format') == 'atlas':
+                self.b_atlas.pack(side='right', padx=(0, 6))
+            else:
+                self.b_atlas.pack_forget()
             self._keep_note()
             self._checks()
             self._fill_terms()
         finally:
             self._loading = False
+        self._later('similar', 120, self._fill_similar)
+        self._later('pins', 140, self._fill_pins)
         self._count_tr()
+        self._hit_info()
         self._later('preview', 80, self._preview)
         self.after_idle(self._fit_all)                   # після розкладки: переноси вже відомі
 
@@ -940,6 +1025,104 @@ class Editor(tk.Toplevel):
         ttk.Button(bf, text='Закрити', command=w.destroy).pack(side='right')
         fill()
 
+    def _open_atlas(self):
+        if not self.cur:
+            return
+        self._commit()
+        self.flush()                     # вікно написів читає переклад із проєкту
+        opener = getattr(self.app, 'open_pics', None)
+        if opener:
+            opener(goto=self.pr.by_key[self.cur]['e']['id'])
+
+    # ============================================================ теги-посилання (з 2.11)
+    def refs(self):
+        if self._refs is None:
+            import tagrefs
+            self._refs = tagrefs.Refs(self.pr)
+        return self._refs
+
+    def _decorate(self, t, text, lang):
+        """Теги, що мають слово, — показати словом (жовтим); сам текст рядка не змінюється."""
+        t.ref_map = {}
+        spans = self.refs().spans(text, lang)
+        if not spans:
+            return
+        ro = str(t.cget('state')) == 'disabled'
+        if ro:
+            t.configure(state='normal')
+        for i, (a, b, tag, word, tr, where) in reversed(list(enumerate(spans))):
+            name = f'ref{i}'
+            t.delete(f'1.0+{a}c', f'1.0+{b}c')
+            t.insert(f'1.0+{a}c', word, ('ref', name))
+            t.ref_map[name] = (tag, word, tr, where)
+        if ro:
+            t.configure(state='disabled')
+
+    def _ref_at(self, t, ev):
+        for name in t.tag_names(f'@{ev.x},{ev.y}'):
+            if name in t.ref_map:
+                return t.ref_map[name]
+        return None
+
+    def _ref_tip(self, t, ev):
+        ref = self._ref_at(t, ev)
+        if ref is None:
+            return self._ref_tip_hide()
+        tag, word, tr, where = ref
+        text = f'{tag}\n= {word}' + (f'  →  {tr}' if tr else '') + f'   ({where})\nклік — скопіювати тег'
+        tip = getattr(self, '_tip', None)
+        if tip is None or not tip.winfo_exists():
+            tip = self._tip = tk.Toplevel(self)
+            tip.overrideredirect(True)
+            tip.attributes('-topmost', True)
+            self._tip_lbl = tk.Label(tip, justify='left', bg='#2b2b2b', fg='#f0f0f0', padx=8, pady=4,
+                                     font=('Segoe UI', 9))
+            self._tip_lbl.pack()
+        self._tip_lbl.configure(text=text)
+        tip.geometry(f'+{ev.x_root + 14}+{ev.y_root + 18}')
+
+    def _ref_tip_hide(self):
+        tip = getattr(self, '_tip', None)
+        if tip is not None and tip.winfo_exists():
+            tip.destroy()
+        self._tip = None
+
+    def _ref_copy(self, t, ev):
+        ref = self._ref_at(t, ev)
+        if ref:
+            self.clipboard_clear()
+            self.clipboard_append(ref[0])
+            self.status.set(f'Скопійовано тег {ref[0]} — встав у переклад, якщо там має бути саме він.')
+
+    def _ref_menu(self, t, ev):
+        """Пункт правої кнопки над словом-тегом або над тегом без слова: «своє слово»."""
+        import tagrefs
+        ref = self._ref_at(t, ev)
+        if ref:
+            tag = ref[0]
+        else:                           # тег без слова (<ITEM>…) — той, на якому клікнули
+            idx = t.index(f'@{ev.x},{ev.y}')
+            line = t.get(f'{idx} linestart', f'{idx} lineend')
+            col = int(idx.split('.')[1])
+            tag = next((m.group(0) for m in tagrefs.TAG.finditer(line) if m.start() <= col < m.end()), None)
+        if not tag:
+            return []
+        return [(f'Своє слово для {tag}…', lambda: self._ref_set(tag))]
+
+    def _ref_set(self, tag):
+        cur = self.refs().user.get(tag, '')
+        word = simpledialog.askstring('Своє слово для тега',
+                                      f'Що показувати замість {tag} в оригіналі й японській?\n'
+                                      '(порожньо — як було)', initialvalue=cur, parent=self)
+        if word is None:
+            return
+        try:
+            self.refs().set_user(tag, word)
+        except OSError as ex:
+            self.status.set(f'Не збережено: {ex}')
+            return
+        self._show_row(keep_text=True)
+
     def _keep_note(self):
         """Підказка під полем: рядок позначено «не перекладати»."""
         if self.cur and self.pr.by_key[self.cur].get('лишити'):
@@ -976,7 +1159,8 @@ class Editor(tk.Toplevel):
         for w in self.terms_box.winfo_children():
             w.destroy()
         r = self.pr.by_key[self.cur]
-        found = [t for t in glossary.found(r['e']['src'], self.terms) if t.get('ua')]
+        # теги-посилання — словами: «<WORD=ABYSS>» знаходить термін Abyss
+        found = [t for t in glossary.found(self.refs().plain(r['e']['src']), self.terms) if t.get('ua')]
         if not found:
             ttk.Label(self.terms_box, text='—', style='Hint.TLabel').pack(anchor='w')
             return
@@ -991,6 +1175,196 @@ class Editor(tk.Toplevel):
                 b.bind('<Button-1>', lambda e, v=v: self._insert(v))
             if t.get('примітка'):
                 ttk.Label(row, text=f'({t["примітка"]})', style='Hint.TLabel').pack(side='left')
+
+    def _fill_similar(self):
+        """Схожі перекладені рядки під термінами; немає — блок схований."""
+        for w in self.sim_box.winfo_children():
+            w.destroy()
+        k = self.cur
+        sims = self.pr.similar(k) if k and self.pr.by_key[k]['kind'] != 'key' else []
+        if not sims:
+            self.sim_lbl.pack_forget()
+            self.sim_box.pack_forget()
+            return
+        self.sim_lbl.pack(anchor='w', pady=(8, 0), after=self.terms_box)
+        self.sim_box.pack(fill='x', after=self.sim_lbl)
+        wrap = max(200, self.sim_box.winfo_width() - 60) if self.sim_box.winfo_width() > 1 else PREVIEW_W - 60
+        for ratio, x in sims:
+            e = self.pr.by_key[x]['e']
+            row = ttk.Frame(self.sim_box)
+            row.pack(anchor='w', fill='x', pady=(2, 0))
+            ttk.Label(row, text=f'{round(ratio * 100)}%', style='Hint.TLabel', width=5).pack(side='left', anchor='n')
+            col = ttk.Frame(row)
+            col.pack(side='left', fill='x', expand=True)
+            ttk.Label(col, text=one_line(e['src']), style='Hint.TLabel', wraplength=wrap,
+                      justify='left').pack(anchor='w')
+            b = tk.Label(col, text=one_line(e['tr']), fg=self.c.get('link', '#005fb8'), bg=self.c['bg'],
+                         cursor='hand2', wraplength=wrap, justify='left', anchor='w', font=('Segoe UI', 10))
+            b.pack(anchor='w')
+            b.bind('<Button-1>', lambda ev, t=e['tr']: self._take_similar(t))
+
+    # ============================================================ картинки до тексту (з 2.11)
+    def pins(self):
+        if self._pins is None:
+            import pins
+            self._pins = pins.Pins(self.pr.xl)
+        return self._pins
+
+    def _pin_texts(self, r):
+        e = self.pr.by_key[r]['e'] if isinstance(r, str) else r['e']
+        ref = self.refs()
+        return [ref.plain(e['src']), e['src'], e.get('ja', ''), ref.plain(e.get('ja', ''), 'ja')]
+
+    def _fill_pins(self):
+        for w in self.pins_box.winfo_children():
+            w.destroy()
+        self.pin_photos = []
+        k = self.cur
+        if not k:
+            self.b_pin_hidden.pack_forget()
+            return
+        try:
+            shown, hidden = self.pins().for_row(k, self._pin_texts(k))
+        except Exception as ex:                                   # noqa: BLE001
+            ttk.Label(self.pins_box, text=f'картинки не прочитано: {ex}', style='Hint.TLabel').pack(anchor='w')
+            return
+        if hidden:
+            self.b_pin_hidden.configure(text=('Сховати приховані' if self._pin_hidden_mode
+                                              else f'Показати приховані ({len(hidden)})'))
+            self.b_pin_hidden.pack(side='left')
+        else:
+            self.b_pin_hidden.pack_forget()
+            self._pin_hidden_mode = False
+        items = [(x, False) for x in shown] + ([(x, True) for x in hidden] if self._pin_hidden_mode else [])
+        if not items:
+            ttk.Label(self.pins_box, text='—', style='Hint.TLabel').pack(anchor='w')
+            return
+        from PIL import Image as PImage
+        for i, (x, is_hidden) in enumerate(items):
+            p = self.pins().file(x)
+            cell = ttk.Frame(self.pins_box)
+            cell.grid(row=i // 3, column=i % 3, sticky='nw', padx=(0, 8), pady=(2, 4))
+            try:
+                im = PImage.open(p)
+                im.thumbnail((150, 110))
+                ph = ImageTk.PhotoImage(im)
+                self.pin_photos.append(ph)
+                pic = tk.Label(cell, image=ph, bg=self.c['bg'], cursor='hand2', bd=0)
+            except (OSError, AttributeError, TypeError):
+                pic = tk.Label(cell, text='(файл зник)', bg=self.c['bg'], fg=self.c['dim'])
+            pic.pack(anchor='w')
+            cap = ttk.Frame(cell)
+            cap.pack(anchor='w', fill='x')
+            ttk.Label(cap, text=x.get('слово') or 'цей рядок', style='Hint.TLabel').pack(side='left')
+            if is_hidden:
+                ttk.Button(cap, text='Повернути', width=9,
+                           command=lambda x=x: self._pin_hide(x, False)).pack(side='right')
+            else:
+                ttk.Button(cap, text='×', width=2,
+                           command=lambda x=x: self._pin_hide(x, True)).pack(side='right')
+            for w in (pic,):
+                w.bind('<Double-1>', lambda e, x=x: self._pin_view(x))
+                w.bind('<Button-3>', lambda e, x=x: self._pin_menu(e, x))
+
+    def _pin_toggle_hidden(self):
+        self._pin_hidden_mode = not self._pin_hidden_mode
+        self._fill_pins()
+
+    def _pin_hide(self, x, on):
+        """× — не показувати цю картинку в цьому рядку (і лише в ньому)."""
+        self.pins().hide(x['id'], self.cur, on)
+        self.status.set('Картинку сховано в цьому рядку («Показати приховані» — повернути).' if on
+                        else 'Картинку повернуто в цей рядок.')
+        self._fill_pins()
+
+    def _pin_view(self, x):
+        p = self.pins().file(x)
+        if p:
+            import imageview
+            imageview.ImageView(self, p, title=x.get('слово') or 'Картинка', colors=self.c)
+
+    def _pin_menu(self, ev, x):
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label='Відкрити більшою', command=lambda: self._pin_view(x))
+        m.add_command(label='Змінити слово…', command=lambda: self._pin_word(x))
+        m.add_separator()
+        m.add_command(label='Видалити картинку', command=lambda: self._pin_remove(x))
+        try:
+            m.tk_popup(ev.x_root, ev.y_root)
+        finally:
+            m.grab_release()
+
+    def _ask_pin_word(self, initial):
+        return simpledialog.askstring(
+            'Картинка до слова',
+            'Показувати в усіх рядках, де є слово чи фраза (англійською, японською чи словом тега):\n'
+            '(порожньо — лише в цьому рядку)', initialvalue=initial, parent=self)
+
+    def _pin_word(self, x):
+        word = self._ask_pin_word(x.get('слово', ''))
+        if word is not None:
+            self.pins().set_word(x['id'], word, self.cur)
+            self._fill_pins()
+
+    def _pin_remove(self, x):
+        if messagebox.askyesno('Видалити картинку', 'Видалити картинку з усіх рядків?', parent=self):
+            self.pins().remove(x['id'])
+            self._fill_pins()
+
+    def _pin_add(self):
+        if not self.cur:
+            return
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label='З файлу…', command=lambda: self._pin_add_from(False))
+        m.add_command(label='З буфера обміну (Win+Shift+S, скопійована картинка)',
+                      command=lambda: self._pin_add_from(True))
+        x, y = self.b_pin.winfo_rootx(), self.b_pin.winfo_rooty() + self.b_pin.winfo_height()
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
+
+    def _pin_add_from(self, clipboard):
+        from tkinter import filedialog
+        from PIL import ImageGrab
+        if clipboard:
+            got = ImageGrab.grabclipboard()
+            if isinstance(got, list):
+                got = next((p for p in got if p.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'))), None)
+            if got is None:
+                messagebox.showinfo('Картинка', 'У буфері обміну немає картинки.', parent=self)
+                return
+        else:
+            got = filedialog.askopenfilename(parent=self, title='Картинка до тексту',
+                                             filetypes=[('Картинки', '*.png *.jpg *.jpeg *.bmp *.gif *.webp'),
+                                                        ('Усі файли', '*.*')])
+            if not got:
+                return
+        try:
+            sel = self.src_text.get('sel.first', 'sel.last').strip()
+        except tk.TclError:
+            sel = ''
+        word = self._ask_pin_word(sel.split('\n')[0])
+        if word is None:
+            return
+        try:
+            self.pins().add(got, word, self.cur)
+        except Exception as ex:                                   # noqa: BLE001
+            messagebox.showerror('Картинка', f'Не вдалося додати: {ex}', parent=self)
+            return
+        self.status.set('Картинку прикріплено' + (f' до «{word}» — покажеться в усіх рядках з цим словом.'
+                                                  if word.strip() else ' до цього рядка.'))
+        self._fill_pins()
+
+    def _take_similar(self, text):
+        """Переклад схожого рядка — у поле (замість того, що там є; Ctrl+Z — повернути)."""
+        self.tr_text.edit_separator()
+        self.tr_text.delete('1.0', 'end')
+        self.tr_text.insert('1.0', text)
+        self.tr_text.edit_separator()
+        self.tr_text.focus_set()
+        self.tr_text.mark_set('insert', 'end-1c')
+        self.status.set('Взято переклад схожого рядка — виправ різницю (Ctrl+Z — повернути як було).')
 
     def _insert(self, s):
         self.tr_text.insert('insert', s)
@@ -1036,6 +1410,8 @@ class Editor(tk.Toplevel):
         if text.strip() == self.pr.tr(k):
             return
         changed = self.pr.set_tr(k, text)
+        if changed and self._refs is not None:
+            self._refs.reset_tr()       # переклад слова, на яке посилаються теги, міг змінитись
         if changed:
             self._update_rows(changed)
             n = len(changed)

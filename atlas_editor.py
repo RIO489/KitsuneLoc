@@ -187,6 +187,18 @@ class Editor(tk.Toplevel):
             self.tree.selection_set(first)
             self.tree.focus(first)
 
+    def goto(self, key):
+        """Стати на напис `key` (з редактора перекладу: рядок книги написів) — фільтри скидаємо."""
+        if not any(r['id'] == key for r in self.rows):
+            return False
+        self.q.set('')
+        self.only_todo.set(False)
+        self._fill()
+        self.tree.selection_set(key)
+        self.tree.focus(key)
+        self.tree.see(key)
+        return True
+
     # ---------------------------------------------------------------- книга
     def _read_book(self):
         if self.pr is not None:

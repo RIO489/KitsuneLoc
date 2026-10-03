@@ -59,6 +59,9 @@ class RemindersWindow(tk.Toplevel):
         ttk.Label(right, textvariable=self.info, style='Hint.TLabel').pack(anchor='w', pady=(2, 6))
         self.pic = tk.Label(right, bg=c['bg'], bd=0, fg=c.get('dim', '#888888'))
         self.pic.pack(anchor='w')
+        # подвійний клік — знімок на весь екран з наближенням (imageview)
+        self.pic.bind('<Double-1>', lambda e: self._zoom())
+        self.pic_path, self.pic_box = None, None
         nf = ttk.Frame(right)
         nf.pack(fill='x', pady=(8, 0))
         ttk.Label(nf, text='Примітка:').pack(side='left')
@@ -124,6 +127,7 @@ class RemindersWindow(tk.Toplevel):
         when = item.get('час', '').replace('T', ' ')
         self.info.set(' · '.join(x for x in (item.get('стан'), item.get('хто'), when) if x))
         p = self.store.file(item)
+        self.pic_path, self.pic_box = p, item.get('рамка')
         if not p:
             self.pic.configure(image='', text='(без знімка)')
             return
@@ -140,7 +144,16 @@ class RemindersWindow(tk.Toplevel):
             d.rectangle([box[0] * k - 3, box[1] * k - 3, box[2] * k + 3, box[3] * k + 3],
                         outline='#ffcc33', width=3)
         self.photo = ImageTk.PhotoImage(im)
-        self.pic.configure(image=self.photo, text='')
+        self.pic.configure(image=self.photo, text='', cursor='hand2')
+
+    def _zoom(self):
+        """Знімок у вікні перегляду: наблизити, розгледіти напис."""
+        if not self.pic_path or not os.path.exists(self.pic_path):
+            return
+        import imageview
+        b = self.pic_box
+        imageview.ImageView(self, self.pic_path, title=self.head.get()[:80] or 'Знімок',
+                            boxes=[(*b, '#ffcc33')] if b else (), colors=self.app.colors())
 
     # ------------------------------------------------------------ дії
     def _note_changed(self):

@@ -93,6 +93,9 @@ class WatchWindow(tk.Toplevel):
         self.canvas = tk.Canvas(self, height=THUMB_W * 9 // 16, highlightthickness=0, bd=0,
                                 bg=c.get('panel', '#202020'))
         self.canvas.pack(fill='x', padx=10, pady=6)
+        # подвійний клік — кадр (чи знімок з журналу) на весь екран з наближенням
+        self.canvas.bind('<Double-1>', lambda e: self._zoom())
+        self.canvas.configure(cursor='hand2')
 
         lf = ttk.Frame(self)
         lf.pack(fill='both', expand=True, padx=10, pady=(0, 10))
@@ -416,6 +419,21 @@ class WatchWindow(tk.Toplevel):
         self.b_live.pack(side='right', padx=(6, 0))
         self.status.set(f'Знімок з журналу ({shot["час"]}): «{shot["текст"][:80]}». '
                         'Права кнопка — зберегти в нагадування; «Наживо» — назад до гри.')
+
+    def _zoom(self):
+        import imageview
+        if self.pinned and self.pinned in self.shots:
+            sh = self.shots[self.pinned]
+            if os.path.exists(sh['файл']):
+                imageview.ImageView(self, sh['файл'], title=sh['текст'][:80],
+                                    boxes=[(*sh['рамка'], STATES[sh['стан']][1])], colors=self.app.colors())
+            return
+        last = getattr(self, 'last', None)
+        if last:
+            img, shown = last
+            imageview.ImageView(self, img.copy(), title='Кадр гри',
+                                boxes=[(*box, STATES[st][1]) for _r, _k, st, box, _t in shown],
+                                colors=self.app.colors())
 
     def _unpin(self):
         if not self.pinned:
