@@ -22,6 +22,40 @@ class MTError(Exception):
         self.fatal, self.split = fatal, split
 
 
+# ============================================================ бібліотека anthropic (лише для Claude)
+# Не обов'язкова (з 3.1): потрібна лише тим, хто перекладає через Claude, — ставиться кнопкою
+# «Встановити» у вікні машинного перекладу, а не «Встановити.bat».
+def anthropic_state():
+    """'ok' | 'missing' | 'old' (0.x не знає fallbacks / output_config) — без імпорту бібліотеки."""
+    import importlib.metadata, importlib.util
+    if importlib.util.find_spec('anthropic') is None:
+        return 'missing'
+    try:
+        major = int(importlib.metadata.version('anthropic').split('.')[0])
+    except Exception:                                       # noqa: BLE001
+        return 'ok'
+    return 'old' if major < 1 else 'ok'
+
+
+def install_anthropic():
+    """pip install --upgrade anthropic (кличуть у фоні, ~1 хв). -> (вдалося, повідомлення)."""
+    import importlib, subprocess, sys
+    try:
+        r = subprocess.run([sys.executable, '-m', 'pip', 'install', '--upgrade', 'anthropic'],
+                           capture_output=True, text=True, timeout=600,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+    except Exception as ex:                                 # noqa: BLE001
+        return False, f'не вдалося запустити pip: {ex}'
+    importlib.invalidate_caches()
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or '').strip().splitlines()[-3:]
+        return False, 'pip не встановив бібліотеку: ' + ' / '.join(tail)
+    old = sys.modules.get('anthropic')
+    if old is not None and int(getattr(old, '__version__', '1').split('.')[0]) < 1:
+        return True, 'оновлено — перезапусти програму, щоб узялась нова версія'
+    return True, 'встановлено'
+
+
 # ============================================================ Claude
 # (id, підпис, $ за 1 млн токенів: вхід, вихід) — ціни Anthropic API на 2026-09
 CLAUDE_MODELS = (('claude-opus-5-5', 'Opus 5.5 — найкраща якість', 4.0, 20.0),

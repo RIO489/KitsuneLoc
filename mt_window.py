@@ -188,10 +188,8 @@ class MTWindow(tk.Toplevel):
     def _engine(self, quiet=False):
         s = self.svc.get()
         if s == 'claude':
-            try:
-                import anthropic            # noqa: F401
-            except ImportError:
-                raise engines.MTError('немає бібліотеки anthropic — запусти «Встановити.bat»')
+            if engines.anthropic_state() != 'ok':
+                raise engines.MTError('для Claude потрібна бібліотека anthropic — «Почати» запропонує її встановити')
             games = getattr(self.ed.app, 'GAMES', None) or {}
             title = games.get(self.pr.game, {}).get('title', self.pr.game)
             return engines.Claude(self._model_id(), title, self.style_t.get('1.0', 'end-1c'),
@@ -210,6 +208,17 @@ class MTWindow(tk.Toplevel):
         rows = self._rows()
         if not rows:
             self._say('Нема чого перекладати: усе вибране вже має машинний чи свій переклад.')
+            return
+        if self.svc.get() == 'claude' and engines.anthropic_state() != 'ok':
+            # бібліотека для Claude не обов'язкова (з 3.1) — ставимо, коли справді знадобилась
+            if messagebox.askyesno('Машинний переклад', 'Для Claude потрібна бібліотека anthropic (~20 МБ, раз; '
+                                   'потрібен інтернет). DeepL і Google — без неї.\n\nВстановити зараз?', parent=self):
+                self._say('Встановлюю бібліотеку anthropic… (до хвилини)')
+
+                def install():                  # (не «job»: так звати модуль mt.job)
+                    ok, msg = engines.install_anthropic()
+                    self.q.put(('log', f'Бібліотека anthropic: {msg}.' + (' Тепер «Почати».' if ok else '')))
+                threading.Thread(target=install, daemon=True).start()
             return
         settings = getattr(self.ed.app, 'settings', {})
         if not settings.get('mt_consent'):

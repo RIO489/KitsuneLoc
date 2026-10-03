@@ -38,9 +38,8 @@ def game_dir():
     except (OSError, ValueError):
         pass
     sys.path.insert(0, ROOT)
-    import runpy
-    gui = runpy.run_path(os.path.join(ROOT, 'Переклад.pyw'), run_name='x')
-    return gui['find_game'](gui['GAMES']['nep'])
+    import core
+    return core.find_game(core.GAMES['nep'])
 
 
 def pac(arc):
