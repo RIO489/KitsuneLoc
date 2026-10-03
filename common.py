@@ -179,7 +179,15 @@ def _unity_patched(path):
         # \u043a\u043e\u043b\u043e\u043d\u043a\u0430 \u043f\u043e\u043a\u0430\u0437\u0443\u0432\u0430\u043b\u0430 \u0443\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0435 (\u043a\u043e\u043f\u0456\u044e \u0437\u0440\u043e\u0431\u043b\u0435\u043d\u043e \u0437 \u0443\u0436\u0435 \u043f\u0435\u0440\u0435\u043a\u043b\u0430\u0434\u0435\u043d\u043e\u0457 \u0433\u0440\u0438)
         if any(cyr(s) for _p, _l, s in scan(o.get_raw_data())):
             return True
-    return any(cyr(text) for _o, _g, text in tmptext.texts(env))
+    from unity import tmplayout
+    for o, _g, text in tmptext.texts(env):
+        if cyr(text):
+            return True
+        # автопідбір кегля з нашими межами вмикає імпорт (TMP_AUTOSIZE); в оригіналах Crystar
+        # автопідбору немає в жодного поля
+        if tmplayout.is_ours(o.get_raw_data()):
+            return True
+    return False
 
 
 def is_original(path, want=None):

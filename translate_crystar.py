@@ -30,6 +30,10 @@ FMT = 'unity-mb2'
 # Профіль гри (дані, не код): де лежать написи префабів і TMP-шрифти.
 PREFAB_BUNDLES = ('uiscene', 'uistatic')     # написи TMP у префабах (титри, AUTO SAVE, SKIP…)
 FONT_BUNDLES = ('uistatic',)                 # TMP-шрифти Stella-FOT_* з атласами
+# Автопідбір кегля інтерфейсних полів TMP (unity/tmplayout): довший за оригінал переклад
+# зменшується до цієї частки кегля, а не переноситься чи зникає («Звичайна» — 126 px у кнопці
+# 120 px; «Швидкість камери» — у два рядки). Що влазить — лишається як було. None — вимкнено.
+TMP_AUTOSIZE = 0.7                           # = unity.tmplayout.DEFAULT_MIN (за ним common впізнає перекладене)
 PREFAB_FMT = 'unity-tmp'
 CREDITS = ('uiJobName', 'uiNameText', 'uiSectionText', 'uiTitleText')   # GameObject-и титрів
 
@@ -92,9 +96,17 @@ def export_prefabs(a):
     print(f'написи в префабах інтерфейсу (титри тощо): {n}')
 
 
+def _tmp_class(o):
+    try:
+        return o.read().m_Script.read().m_ClassName
+    except Exception:
+        return ''
+
+
 def import_prefabs(a):
-    """Написи префабів + шрифти: кожен бандл читається й пишеться один раз."""
-    from unity import tmptext, fontfix
+    """Написи префабів + шрифти + автопідбір кегля полів (TMP_AUTOSIZE): кожен бандл
+    читається й пишеться один раз."""
+    from unity import tmptext, fontfix, tmplayout
     total = 0
     for name in sorted(set(PREFAB_BUNDLES) | set(FONT_BUNDLES)):
         path = _src(a, name)
@@ -105,14 +117,26 @@ def import_prefabs(a):
         if name in PREFAB_BUNDLES:
             doc = locfile.load_doc(a.work_dir, f'prefab/{name}')
             tr = {e['id']: e for e in (doc or {}).get('entries', []) if e.get('tr')}
-            for o, _go, text in tmptext.texts(env) if tr else []:
+            fit = 0
+            for o, _go, text in tmptext.texts(env):
+                raw = new = o.get_raw_data()     # після set_raw_data UnityPy віддає старі байти — один запис
                 e = tr.get(str(o.path_id))
                 if e and e['src'] == text and e['tr'] != text:
-                    o.set_raw_data(tmptext.with_text(o.get_raw_data(), e['tr']))
+                    new = tmptext.with_text(new, e['tr'])
                     changed += 1
+                if TMP_AUTOSIZE and _tmp_class(o) == 'TextMeshProUGUI':
+                    got = tmplayout.autosize(new, TMP_AUTOSIZE)
+                    if got is not None and got != new:
+                        new = got
+                        fit += 1
+                if new != raw:
+                    o.set_raw_data(new)
             if changed:
                 print(f'  {name}: написів у префабах {changed}')
+            if fit:
+                print(f'  {name}: автопідбір кегля полів тексту — {fit}')
             total += changed
+            changed += fit
         if name in FONT_BUNDLES:
             for font, notes in fontfix.fix_bundle(env):
                 print(f'  шрифт {font}: ' + '; '.join(notes))
