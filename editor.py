@@ -350,9 +350,29 @@ class Editor(tk.Toplevel):
         self._pins, self._pin_hidden_mode, self.pin_photos = None, False, []
 
         self.pic_title = tk.StringVar(value='Як у грі')
-        ttk.Label(right, textvariable=self.pic_title).pack(anchor='w', pady=(8, 0))
-        self.pic_box = ttk.Frame(right)
-        self.pic_box.pack(anchor='w', fill='x')
+        tf = ttk.Frame(right)
+        tf.pack(fill='x', pady=(8, 0))
+        ttk.Label(tf, textvariable=self.pic_title).pack(side='left')
+        # масштаб прев'ю (прохання перекладача: на екрані 2K «вписане» прев'ю — дрібне):
+        # «Вписати» — під ширину панелі, інакше — сталий масштаб, ширше за панель — прокрутка вбік;
+        # Ctrl+коліщатко над прев'ю — те саме
+        z = getattr(self.app, 'settings', {}).get('editor_preview_zoom', 'fit')
+        self.pv_zoom = z if z == 'fit' or isinstance(z, (int, float)) else 'fit'
+        ttk.Button(tf, text='Вписати', command=lambda: self._pv_set('fit')).pack(side='right')
+        ttk.Button(tf, text='+', width=2, command=lambda: self._pv_step(1)).pack(side='right', padx=(2, 6))
+        self.pv_info = tk.StringVar()
+        ttk.Label(tf, textvariable=self.pv_info, style='Hint.TLabel', width=6, anchor='center').pack(side='right')
+        ttk.Button(tf, text='−', width=2, command=lambda: self._pv_step(-1)).pack(side='right', padx=(0, 2))
+        self.pic_wrap = ttk.Frame(right)
+        self.pic_wrap.pack(anchor='w', fill='x')
+        self.pic_cv = tk.Canvas(self.pic_wrap, height=40, highlightthickness=0, bd=0, bg=c['bg'])
+        self.pic_cv.pack(fill='x')
+        self.pic_sb = ttk.Scrollbar(self.pic_wrap, orient='horizontal', command=self.pic_cv.xview)
+        self.pic_cv.configure(xscrollcommand=self.pic_sb.set)
+        self.pic_box = ttk.Frame(self.pic_cv)
+        self.pic_cv.create_window(0, 0, window=self.pic_box, anchor='nw')
+        self.pic_box.bind('<Configure>', lambda e: self._pv_layout())
+        self.pic_cv.bind('<Configure>', lambda e: self._pv_layout())
         self.pic = tk.Label(self.pic_box, bg=c['bg'], bd=0, anchor='nw', justify='left',
                             fg=c['dim'], text='…')
         self.pic.pack(anchor='w')
@@ -435,6 +455,13 @@ class Editor(tk.Toplevel):
         """Коліщатко над панеллю рядка прокручує панель (поле з власною прокруткою — само)."""
         w = ev.widget
         try:
+            if str(w).startswith(str(self.pic_wrap)):
+                if ev.state & 0x4:                       # Ctrl+коліщатко над прев'ю — масштаб
+                    self._pv_step(1 if ev.delta > 0 else -1)
+                    return 'break'
+                if ev.state & 0x1 and self.pic_sb.winfo_manager():   # Shift — прев'ю вбік
+                    self.pic_cv.xview_scroll(-3 if ev.delta > 0 else 3, 'units')
+                    return 'break'
             if not str(w).startswith(str(self.rcanvas)):
                 return
             if isinstance(w, tk.Text) and w.yview() != (0.0, 1.0):
@@ -1654,7 +1681,7 @@ class Editor(tk.Toplevel):
         r = self.pr.by_key[k]
         e = r['e']
         if e.get('preview') and os.path.exists(e['preview']):
-            self._pics([(None, Image.open(e['preview']), '')])
+            self._pics([(None, self._pv_scale(Image.open(e['preview'])), '')])
             return
         if self.fonts is None or self.ctx is None or not self.ctx.get('wtab'):
             self._pics([(None, None, 'прев\'ю готується…' if self.fonts is None or self.ctx is None
@@ -1669,32 +1696,92 @@ class Editor(tk.Toplevel):
         name = self.pr.speaker(r) if dialog else None
         screens = self.ctx.get('screens') if dialog else None
         if screens:
-            self.lim_box.pack(anchor='w', fill='x', pady=(4, 0), after=self.pic_box)
+            self.lim_box.pack(anchor='w', fill='x', pady=(4, 0), after=self.pic_wrap)
         else:
             self.lim_box.pack_forget()
         if dialog:
             self.rowlim_box.pack_forget()
         else:                                    # межа окремого рядка (діалогам — межі вікон)
             self.rowlim_box.pack(anchor='w', fill='x', pady=(4, 0),
-                                 after=self.lim_box if self.lim_box.winfo_manager() else self.pic_box)
-        width = max(200, min(PREVIEW_W, self.pic_box.winfo_width() - 8))
+                                 after=self.lim_box if self.lim_box.winfo_manager() else self.pic_wrap)
         items = []
         for sc in screens or [None]:
             font = self.fonts.get(sc['font'] if sc else 'msg')
             if font is None:
                 continue
             lim, lines, _w = sheets.width_limit(doc, e, self.ctx, sc)
+            if not dialog and self._rowlim_key() not in (self.ctx.get('rowlim') or {}):
+                # поле гри, де показується цей текст (Crystar: вікно репліки) — ширина з префаба;
+                # гра переносить сама, тож і прев'ю переноситься в цю ширину
+                box = next((b for b in self.ctx.get('boxes') or [] if re.search(b['re'], r['source'])), None)
+                if box:
+                    lim, lines = box['px'], None
+            else:
+                box = None
             if not dialog:
                 self._rowlim_show(lim, lines)
+                if box:
+                    self.rowlim_info.set(f'Межа — {box["назва"]} гри ({round(lim)} px, взято з самої гри); '
+                                         'гра переносить рядки сама. Своя межа — числа нижче чи клік по прев\'ю.')
             try:
                 im, _notes = preview.render(font, text, lim, lines, name, dialog)
             except Exception as ex:                               # noqa: BLE001
                 items.append((None, None, f'прев\'ю не вдалося: {ex}'))
                 continue
             cap = sc['назва'].capitalize() if sc and len(screens) > 1 else None
-            small = preview.fit(im, width)
+            small = self._pv_scale(im)
             items.append((cap, small, '', sc if dialog else 'row', small.width / im.width))
         self._pics(items or [(None, None, '')])
+
+    # ============================================================ масштаб прев'ю (з 2.13)
+    PV_STEPS = (0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1.0, 1.25, 1.5, 1.75, 2.0)
+
+    def _pv_panel_w(self):
+        w = self.pic_cv.winfo_width()
+        return max(200, (w if w > 1 else PREVIEW_W) - 8)
+
+    def _pv_scale(self, im):
+        """Картинка прев'ю в обраному масштабі («Вписати» — під ширину панелі)."""
+        if self.pv_zoom == 'fit':
+            import preview
+            small = preview.fit(im, self._pv_panel_w())
+        else:
+            z = float(self.pv_zoom)
+            small = im if z == 1 else im.resize((max(1, round(im.width * z)), max(1, round(im.height * z))),
+                                                Image.LANCZOS if z < 1 else Image.BICUBIC)
+        self._pv_last = small.width / max(1, im.width)
+        self.pv_info.set(f'{round(self._pv_last * 100)}%')
+        return small
+
+    def _pv_set(self, z):
+        self.pv_zoom = z
+        self._save_setting('editor_preview_zoom', z)
+        self.pic_cv.xview_moveto(0)
+        self._later('preview', 0, self._preview)
+
+    def _pv_step(self, d):
+        """−/+ від того масштабу, що зараз на екрані (і з «Вписати» теж)."""
+        cur = getattr(self, '_pv_last', 1.0)
+        steps = self.PV_STEPS
+        if d > 0:
+            z = next((s for s in steps if s > cur + 0.01), steps[-1])
+        else:
+            z = next((s for s in reversed(steps) if s < cur - 0.01), steps[0])
+        self._pv_set(z)
+
+    def _pv_layout(self):
+        """Висота полотна — за прев'ю; ширше за панель — смуга прокрутки вбік."""
+        try:
+            w, h = self.pic_box.winfo_reqwidth(), self.pic_box.winfo_reqheight()
+            self.pic_cv.configure(height=h, scrollregion=(0, 0, w, h))
+            if w > self.pic_cv.winfo_width() + 2:
+                if not self.pic_sb.winfo_manager():
+                    self.pic_sb.pack(fill='x')
+            elif self.pic_sb.winfo_manager():
+                self.pic_sb.pack_forget()
+                self.pic_cv.xview_moveto(0)
+        except tk.TclError:
+            pass
 
     # ============================================================ групи
     def _list_menu(self, ev):

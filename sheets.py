@@ -738,7 +738,9 @@ def limits(docs, backup_dir, cache_dir, widths=None, rows=None):
         sc['lim'] = (widths or {}).get(sc['id']) or sc['lim0']
     return {'wtab': wtab, 'game': game, 'gmax': gmax, 'gcount': gcount, 'glines': glines,
             'screens': screens, 'rowlim': rows or {},
-            'wrap': bool(game) and metrics.wraps(game, backup_dir)}
+            'wrap': bool(game) and metrics.wraps(game, backup_dir),
+            # поля, де гра Unity показує документ (вікно репліки…), — лише для прев'ю
+            'boxes': metrics.unity_boxes(game, backup_dir, cache_dir) if game else []}
 
 
 DIALOG_PCT = 0.999          # частка рядків оригіналу, що мусить уміститися у вікні діалогу

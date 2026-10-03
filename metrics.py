@@ -46,6 +46,57 @@ def unity_bundle(game, backup_dir):
     return None
 
 
+def unity_boxes(game, backup_dir, cache_dir):
+    """Поля префабів, у яких гра Unity показує документи (PREVIEW_BOXES модуля translate_<гра>):
+    [{'re', 'px' — ширина в px шрифту програми (кегль атласу), 'назва'}]. Кеш — за бандлами."""
+    try:
+        mod = importlib.import_module(f'translate_{game}')
+    except ImportError:
+        return []
+    spec = getattr(mod, 'PREVIEW_BOXES', None)
+    font = unity_bundle(game, backup_dir)
+    if not spec or not font:
+        return []
+    paths = sorted({os.path.join(backup_dir, b) for _r, b, _p, _n in spec} | {font})
+    if not all(os.path.exists(p) for p in paths):
+        return []
+    sig = json.dumps([[os.path.getsize(p), int(os.path.getmtime(p))] for p in paths] + [spec, _code_sig()],
+                     ensure_ascii=False)
+    cache = os.path.join(cache_dir, f'_вікна_{game}.json')
+    try:
+        c = json.load(open(cache, encoding='utf-8'))
+        if c.get('sig') == sig:
+            return c['boxes']
+    except (OSError, ValueError):
+        pass
+    import UnityPy
+    from unity import tmptext
+    from unity.tmpfont import TmpFont, is_tmp_font
+    point = None                                   # кегль атласу шрифту (одиниці metrics.table)
+    for o in UnityPy.load(font).objects:
+        if o.type.name == 'MonoBehaviour' and is_tmp_font(o):
+            try:
+                f = TmpFont(o.get_raw_data())
+            except ValueError:
+                continue
+            if any(0x410 <= g['id'] <= 0x44F for g in f.glyphs):
+                point = f.face['PointSize']
+                break
+    boxes, envs = [], {}
+    for rx, bundle, path, name in spec:
+        env = envs.get(bundle) or envs.setdefault(bundle, UnityPy.load(os.path.join(backup_dir, bundle)))
+        got = tmptext.field_box(env, path)
+        if got and point:
+            w, h, size = got
+            boxes.append({'re': rx, 'px': round(w * point / size, 1), 'назва': name})
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        json.dump({'sig': sig, 'boxes': boxes}, open(cache, 'w', encoding='utf-8'), ensure_ascii=False)
+    except OSError:
+        pass
+    return boxes
+
+
 def wraps(game, backup_dir):
     """Чи гра сама переносить слова за шириною поля (TMP) — тоді межа рядків важить більше."""
     return _profile(game) is None and unity_bundle(game, backup_dir) is not None

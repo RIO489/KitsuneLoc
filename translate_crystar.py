@@ -33,6 +33,10 @@ FONT_BUNDLES = ('uistatic',)                 # TMP-шрифти Stella-FOT_* з 
 # Автопідбір кегля інтерфейсних полів TMP (unity/tmplayout): довший за оригінал переклад
 # зменшується до цієї частки кегля, а не переноситься чи зникає («Звичайна» — 126 px у кнопці
 # 120 px; «Швидкість камери» — у два рядки). Що влазить — лишається як було. None — вимкнено.
+# Прев'ю в редакторі: документи -> TMP-поле префаба, у якому гра показує цей текст (ширину
+# програма читає з префаба сама — metrics.unity_boxes). Репліки сцен — вікно діалогу
+# (txt_message 1350 px при кеглі 44); гра переносить їх сама, у 99% реплік переносів немає.
+PREVIEW_BOXES = [(r'^Event/', 'uiscene', 'uiEvent/MessageWindow/uiEventMessage/txt_message', 'вікно репліки')]
 TMP_AUTOSIZE = 0.7                           # = unity.tmplayout.DEFAULT_MIN (за ним common впізнає перекладене)
 PREFAB_FMT = 'unity-tmp'
 CREDITS = ('uiJobName', 'uiNameText', 'uiSectionText', 'uiTitleText')   # GameObject-и титрів
